@@ -21,8 +21,17 @@ def _ssh_base(key_path: str, port: int, connect_timeout: int = 20) -> list[str]:
     return [
         "ssh", "-p", str(port),
         "-i", key_path,
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "UserKnownHostsFile=/state/known_hosts",
+        # KEINE Host-Key-Prüfung: Vast recycelt Hostnamen (ssh9.vast.ai etc.)
+        # über kurzlebige Nodes hinweg. Ein gepinnter Key in known_hosts fuehrt
+        # dann zu "Host key verification failed" -> reachable()=False -> die Node
+        # wird nie ready, kein Bootstrap, kein Worker ("immer noch nichts"). Die
+        # Nodes sind ohnehin ephemer und per privatem SSH-Key authentifiziert;
+        # Host-Key-Pinning bringt hier keine Sicherheit, nur Ausfaelle. /dev/null
+        # -> nie schreiben, nie kollidieren; LogLevel=ERROR unterdrueckt die
+        # "Permanently added ..."-Warnung.
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
         "-o", f"ConnectTimeout={connect_timeout}",
         "-o", "ServerAliveInterval=15",
         # BatchMode: nie interaktiv nach Passwort fragen -> hängt nie am Prompt,
