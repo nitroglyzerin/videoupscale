@@ -78,7 +78,9 @@ class Config:
         return cls(
             vast_api_key=api_key,
             vast_image=os.environ.get(
-                "VAST_IMAGE", "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel"
+                # Auto-Tag wählt den GPU-passenden CUDA-Build (5090 -> cu128) ->
+                # torch läuft sofort, cu128-Reinstall in bootstrap.sh entfällt.
+                "VAST_IMAGE", "vastai/pytorch:@vastai-automatic-tag"
             ).strip(),
             vast_disk_gb=int(os.environ.get("VAST_DISK_GB", "320")),
             ssh_key_path=os.environ.get("SSH_KEY_PATH", "/secrets/id_ed25519").strip(),
