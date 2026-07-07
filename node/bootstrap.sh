@@ -104,8 +104,15 @@ fi
 
 # --- 4. Python-Abhängigkeiten ------------------------------------------------
 cd "$SEEDVR2_DIR"
+# Manche Images (z. B. vastai/pytorch) nutzen ein Debian-System-Python mit
+# PEP-668-Schutz ("externally-managed-environment"). Ohne das folgende Flag
+# würde JEDER pip-Install dort abbrechen. Harmlos auf conda-/venv-Images.
+export PIP_BREAK_SYSTEM_PACKAGES=1
+export PIP_ROOT_USER_ACTION=ignore
 PIP="python3 -m pip"
-$PIP install --upgrade pip
+# pip-Upgrade ist optional und scheitert auf Debian-pip ("Cannot uninstall
+# pip 24.0, RECORD file not found") -> NICHT fatal machen; altes pip genügt.
+$PIP install --upgrade pip || log "pip-Upgrade übersprungen (Debian-verwaltetes pip) — unkritisch."
 
 status "3/7 pip: requirements.txt"
 if [ -f requirements.txt ]; then
