@@ -88,7 +88,7 @@ node_endpoints() { ORCH nodes 2>/dev/null | grep -oE 'ssh=[^ ]+' | sed 's/^ssh=/
 node_snapshot() {
   local host="$1" port="$2"
   local remote='
-    w=$(pgrep -c -f process.sh 2>/dev/null || echo 0)
+    w=$(pgrep -c -f "[p]rocess\.sh" 2>/dev/null || echo 0)
     fin=$(ls /workspace/final 2>/dev/null | grep -ic "\.mp4$")
     inp=$(ls /workspace/input 2>/dev/null | wc -l)
     echo "WORKER=$w"

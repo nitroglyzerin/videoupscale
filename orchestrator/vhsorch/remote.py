@@ -6,7 +6,15 @@ rsync ist delta-basiert und resumierbar (--partial), robust bei Abbrüchen.
 from __future__ import annotations
 
 import subprocess
+import time
 from typing import Optional
+
+# pgrep-Muster mit Bracket-Trick: '[p]rocess\.sh' matcht den echten
+# process.sh-Prozess, aber NICHT die pgrep-Kommandozeile selbst (die den
+# String literal '[p]rocess\.sh' enthält -> kein "process.sh"-Substring).
+# Ohne diesen Trick würde pgrep -f seine eigene Wrapper-Shell finden und
+# fälschlich "Worker läuft" melden.
+_PGREP_WORKER = r"pgrep -f '[p]rocess\.sh'"
 
 
 def _ssh_base(key_path: str, port: int) -> list[str]:
@@ -110,7 +118,8 @@ class Remote:
         return sorted(out, key=lambda t: t[0])
 
     def worker_running(self) -> bool:
-        res = self.exec("pgrep -f process.sh >/dev/null 2>&1 && echo yes || echo no", timeout=30)
+        res = self.exec(f"{_PGREP_WORKER} >/dev/null 2>&1 && echo yes || echo no",
+                        timeout=30)
         return res.stdout.strip() == "yes"
 
     def start_worker(self) -> bool:
@@ -124,10 +133,11 @@ class Remote:
             Fehlstart mehr).
         Fortschritt/Fehler landen in /workspace/work/run.log (Monitor tailt es).
         """
-        cmd = (
-            "if pgrep -f /workspace/process.sh >/dev/null 2>&1; then exit 0; fi; "
-            "setsid /workspace/process.sh >>/workspace/work/run.log 2>&1 "
-            "</dev/null & "
-            "sleep 1; pgrep -f /workspace/process.sh >/dev/null 2>&1"
-        )
-        return self.exec(cmd, timeout=60).returncode == 0
+        # Detached starten (eigenes ssh-Kommando OHNE pgrep -> kein Selbsttreffer).
+        launch = ("setsid /workspace/process.sh "
+                  ">>/workspace/work/run.log 2>&1 </dev/null &")
+        self.exec(launch, timeout=30)
+        # Sauber verifizieren: separater pgrep-Aufruf mit Bracket-Trick, dessen
+        # eigene Kommandozeile den echten Prozess NICHT vortäuscht.
+        time.sleep(1.5)
+        return self.worker_running()
