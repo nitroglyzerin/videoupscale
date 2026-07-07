@@ -20,7 +20,9 @@ from typing import Any, Optional
 
 import requests
 
-API_BASE = "https://console.vast.ai/api/v0"
+API_HOST = "https://console.vast.ai"
+API_BASE = f"{API_HOST}/api/v0"      # bundles (search), asks (create), destroy
+API_BASE_V1 = f"{API_HOST}/api/v1"   # instances-Liste (v0 ist deprecated -> 410)
 
 # GPUs, die FP8 (e4m3) kompilieren können: Ada (4090) + Blackwell (5090).
 # Ampere/A100/3090 sind AUSGESCHLOSSEN (FP8 kompiliert dort nicht).
@@ -69,8 +71,8 @@ class VastClient:
             {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
         )
 
-    def _req(self, method: str, path: str, **kw) -> dict[str, Any]:
-        url = f"{API_BASE}{path}"
+    def _req(self, method: str, path: str, base: str = API_BASE, **kw) -> Any:
+        url = f"{base}{path}"
         resp = self._session.request(method, url, timeout=60, **kw)
         if resp.status_code >= 400:
             # API-Key wird nicht mitgeloggt (nur in Session-Header).
@@ -138,8 +140,14 @@ class VastClient:
 
     # --- Status --------------------------------------------------------------
     def show_instances(self) -> list[dict[str, Any]]:
-        data = self._req("GET", "/instances/")
-        return data.get("instances", [])
+        # v0 /instances/ ist deprecated (HTTP 410) -> v1 nutzen.
+        data = self._req("GET", "/instances/", base=API_BASE_V1)
+        # Defensiv: v1 kann {"instances": [...]} ODER eine nackte Liste liefern.
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("instances", [])
+        return []
 
     def get_instance(self, instance_id: int) -> Optional[dict[str, Any]]:
         for inst in self.show_instances():
