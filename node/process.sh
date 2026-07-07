@@ -180,6 +180,26 @@ worker() {
   log "[GPU $gpu] Worker startet in ${delay}s …"
   sleep "$delay"
 
+  # Modell-Download-Wettlauf vermeiden: Nur GPU 0 lädt das Modell (~3 GB) beim
+  # ersten Clip herunter. SeedVR2 lädt nach <datei>.download und benennt dann
+  # um — laufen mehrere Worker parallel, reißen sie sich die Temp-Datei weg und
+  # sterben ("No such file: ...download -> ..."). Deshalb warten GPU 1/2/3, bis
+  # GPU 0 mit dem Encoding begonnen hat (= Modell liegt fertig auf Platte), und
+  # laden es dann von dort (kein Download mehr).
+  if [ "$gpu" -ne 0 ]; then
+    log "[GPU $gpu] wartet auf Modell (Erst-Download durch GPU 0) …"
+    local waited=0
+    while ! grep -qaE "Encoding batch|Materializing|Phase 1" \
+              "$WORK_DIR/logs/gpu0.log" 2>/dev/null; do
+      sleep 10; waited=$(( waited + 10 ))
+      if [ "$waited" -ge 900 ]; then
+        warn "[GPU $gpu] Timeout (15 min) beim Warten auf Modell — starte trotzdem."
+        break
+      fi
+    done
+    log "[GPU $gpu] Modell bereit — starte Verarbeitung."
+  fi
+
   # Endlos abgreifen, bis die Node zerstört wird (Orchestrator bei leerer
   # Queue). Kein Selbst-Exit nötig — die Node wird von außen abgeräumt.
   while true; do
