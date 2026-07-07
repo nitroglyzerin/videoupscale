@@ -74,8 +74,15 @@ class Scheduler:
                         self.db.update_node(iid, status="ready")
                         log(f"Node {iid} ist READY (bootstrap abgeschlossen).")
                     else:
-                        # Noch mitten im Bootstrap: den echten Schritt anzeigen,
-                        # statt still auf 'booked' zu verharren.
+                        # sshd ist oben, Bootstrap aber noch nicht fertig. Statt
+                        # auf Vasts onstart zu warten (feuert oft spät), stoßen
+                        # WIR den Bootstrap selbst an — einmalig, idempotent.
+                        if not node["bootstrap_started"]:
+                            if r.start_bootstrap(self.cfg.repo_raw_url):
+                                self.db.update_node(iid, bootstrap_started=1)
+                                log(f"Node {iid}: Bootstrap per SSH angestoßen "
+                                    f"(nicht auf Vast-onstart gewartet).")
+                        # Fortschritt zeigen, statt still auf 'booked' zu verharren.
                         st = r.bootstrap_status()
                         log(f"Node {iid}: Bootstrap läuft — "
                             f"{st or 'startet, noch keine Statuszeile …'}")

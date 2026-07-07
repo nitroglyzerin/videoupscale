@@ -94,6 +94,35 @@ class Remote:
             return []
         return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
+    def start_bootstrap(self, repo_raw_url: str) -> bool:
+        """Stößt bootstrap.sh detached auf der Node an — sobald sshd oben ist.
+
+        Wir warten NICHT auf Vasts onstart (feuert oft mit Verzögerung), sondern
+        laden bootstrap.sh selbst und starten es via setsid im Hintergrund.
+        Idempotent und kollisionssicher:
+          * bereits fertig (process.sh da)         -> exit 0, nichts tun,
+          * schon angestoßen (.bootstrap.launched)  -> exit 0 (kein Re-curl, das
+            wuerde das laufende Script auf der Platte ueberschreiben),
+          * Marker wird ERST nach erfolgreichem curl gesetzt -> ein fehl-
+            geschlagener curl wird im naechsten Takt erneut versucht.
+        Ein zusaetzliches flock IN bootstrap.sh verhindert Ueberlappung mit
+        einem parallel doch noch feuernden Vast-onstart.
+
+        Rueckgabe: True, wenn das Kommando abgesetzt werden konnte (SSH ok).
+        """
+        cmd = (
+            "bash -lc '"
+            "test -x /workspace/process.sh && exit 0; "
+            "test -e /workspace/.bootstrap.launched && exit 0; "
+            "mkdir -p /workspace; "
+            f'export REPO_RAW_URL=\"{repo_raw_url}\"; '
+            'curl -fsSL \"$REPO_RAW_URL/node/bootstrap.sh\" -o /workspace/bootstrap.sh && '
+            "{ touch /workspace/.bootstrap.launched; "
+            "setsid bash /workspace/bootstrap.sh >>/workspace/bootstrap.log 2>&1 </dev/null & }"
+            "'"
+        )
+        return self.exec(cmd, timeout=40).returncode == 0
+
     def bootstrap_status(self, path: str = "/workspace/bootstrap.status") -> str:
         """Letzte Bootstrap-Statuszeile der Node (leer, wenn noch nichts da).
 

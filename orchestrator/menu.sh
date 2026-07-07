@@ -24,6 +24,12 @@ fi
 
 ORCH() { $DC run --rm orchestrator "$@"; }
 
+# Wie ORCH, aber OHNE TTY/stdin (-T). Für Hintergrund-Fetches (live_orch): sonst
+# allokiert 'docker compose run' ein Pseudo-TTY und greift auf die Tastatur zu —
+# es konkurriert dann mit der Menü-Schleife um stdin und verschluckt Tastendrücke,
+# sodass "beliebige Taste = zurück" während eines Fetches nicht reagiert.
+ORCH_BG() { $DC run --rm -T orchestrator "$@"; }
+
 C_TITLE="\033[1;36m"; C_SEL="\033[7m"; C_DIM="\033[2m"; C_OK="\033[1;32m"
 C_WARN="\033[1;33m"; C_RST="\033[0m"
 
@@ -147,7 +153,7 @@ live_orch() {
   printf '\033[2J'
   # Ersten Fetch SOFORT (im Hintergrund) anstoßen -> kein schwarzer Bildschirm,
   # stattdessen gleich Kopfzeile + Spinner sichtbar.
-  ORCH "$@" >"$tmp" 2>/dev/null & pid=$!; fetching=1
+  ORCH_BG "$@" >"$tmp" 2>/dev/null & pid=$!; fetching=1
 
   while true; do
     # --- Kopfzeile (jede ~0.25 s, Body bleibt stehen) ---
@@ -173,7 +179,7 @@ live_orch() {
 
     # --- Prefetch: schon vor Ablauf nachladen, damit bei 0 Daten bereitstehen ---
     if [ "$fetching" -eq 0 ] && [ "$ready" -eq 0 ] && [ "$secs" -gt 0 ] && [ "$secs" -le "$lead" ]; then
-      ORCH "$@" >"$tmp" 2>/dev/null & pid=$!; fetching=1
+      ORCH_BG "$@" >"$tmp" 2>/dev/null & pid=$!; fetching=1
     fi
 
     # --- ~0.25 s warten; Taste = zurück ---

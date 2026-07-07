@@ -29,9 +29,16 @@ CREATE TABLE IF NOT EXISTS nodes (
     ssh_port    INTEGER,
     status      TEXT NOT NULL,       -- booked|ready|draining|destroyed
     worker_started INTEGER DEFAULT 0,
+    bootstrap_started INTEGER DEFAULT 0,  -- 1, sobald wir den Bootstrap per SSH angestoßen haben
     created_at  REAL
 );
 """
+
+# Nachträglich hinzugekommene Spalten -> für bestehende DBs per ALTER TABLE
+# ergänzen (CREATE TABLE IF NOT EXISTS ändert eine vorhandene Tabelle nicht).
+_MIGRATIONS = [
+    "ALTER TABLE nodes ADD COLUMN bootstrap_started INTEGER DEFAULT 0",
+]
 
 
 class DB:
@@ -42,6 +49,11 @@ class DB:
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA foreign_keys=ON;")
         self._conn.executescript(SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # Spalte existiert bereits — idempotent.
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:

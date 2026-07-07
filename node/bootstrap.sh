@@ -44,6 +44,17 @@ die() { echo -e "\033[1;31m[bootstrap FEHLER]\033[0m $*" >&2; exit 1; }
 mkdir -p /workspace
 STATUS_FILE="/workspace/bootstrap.status"
 status() { echo "$(date +%H:%M:%S) | $*" > "$STATUS_FILE"; log "STATUS: $*"; }
+
+# Einmal-Lock: Bootstrap kann von ZWEI Seiten angestoßen werden — von Vasts
+# onstart UND vom Orchestrator per SSH (start_bootstrap), sobald sshd oben ist.
+# Ohne Lock liefen dann u. U. zwei Bootstraps parallel -> apt/pip/Modell-
+# Wettläufe. flock stellt sicher: nur der erste läuft, der zweite endet sofort.
+exec 9>/workspace/.bootstrap.lock
+if ! flock -n 9; then
+  log "Bootstrap läuft bereits (lock gehalten) — dieser Aufruf beendet sich."
+  exit 0
+fi
+
 trap 'status "FEHLER in Zeile $LINENO — Bootstrap abgebrochen (siehe onstart-Log)"' ERR
 
 status "0/7 Bootstrap gestartet"
