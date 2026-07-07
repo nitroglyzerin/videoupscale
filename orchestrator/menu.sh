@@ -158,16 +158,21 @@ act_monitor() {
 live_orch() {
   local title="$1"; shift
   local iv=5 out header line
-  header="${C_TITLE}== ${title} ==${C_RST}   ${C_DIM}(Refresh ${iv}s · beliebige Taste = zurück)${C_RST}"
+  # Spinner-Zeichen, damit auch bei identischem Inhalt sichtbar ist, dass
+  # aktualisiert wird; dazu ein "Stand: HH:MM:SS"-Zeitstempel pro Frame.
+  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' si=0
   printf '\033[2J'   # einmal initial leeren
   while true; do
-    out="$(ORCH "$@" 2>/dev/null)"
+    out="$(ORCH "$@" 2>/dev/null)"       # läuft ERST (altes Bild bleibt stehen)
+    local now="${spin:si:1}"
+    header="${C_TITLE}== ${title} ==${C_RST}   ${C_DIM}${now} Stand: $(date '+%H:%M:%S') · alle ${iv}s · beliebige Taste = zurück${C_RST}"
     printf '\033[H'                       # Cursor nach oben links
     printf '%b\033[K\n\033[K\n' "$header" # Kopfzeile + Leerzeile
     while IFS= read -r line; do
       printf '%s\033[K\n' "$line"         # ANSI aus ORCH bleibt erhalten (%s)
     done <<<"$out"
     printf '\033[J'                       # alles darunter (altes, längeres Bild) weg
+    si=$(((si + 1) % ${#spin}))
     read -rsn1 -t "$iv" _ && return
   done
 }
