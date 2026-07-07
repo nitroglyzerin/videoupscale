@@ -106,6 +106,22 @@ class DB:
         )
         return cur.rowcount
 
+    def reassign_orphan_clips(self) -> int:
+        """Setzt verwaiste Clips zurück auf pending (Selbstheilung).
+
+        Verwaist = Status assigned/uploaded, aber die zugewiesene Node ist nicht
+        mehr aktiv (booked/ready) — z. B. weil sie zerstört wurde/verschwand,
+        bevor das Ergebnis eingesammelt wurde. Ohne 'done' (kein fertiges
+        Ergebnis lokal) müssen diese Clips neu verarbeitet werden.
+        """
+        cur = self._conn.execute(
+            "UPDATE clips SET status='pending', node_id=NULL, assigned_at=NULL "
+            "WHERE status IN ('assigned','uploaded') AND ("
+            "  node_id IS NULL OR node_id NOT IN ("
+            "    SELECT instance_id FROM nodes WHERE status IN ('booked','ready')))"
+        )
+        return cur.rowcount
+
     def counts(self) -> dict[str, int]:
         rows = self._conn.execute(
             "SELECT status, COUNT(*) c FROM clips GROUP BY status"

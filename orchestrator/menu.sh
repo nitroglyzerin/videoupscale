@@ -150,15 +150,24 @@ act_monitor() {
   done
 }
 
-# Generischer Live-Refresh: ruft 'ORCH <args>' alle iv Sekunden auf und
-# aktualisiert die Anzeige. Beliebige Taste -> zurück.
+# Generischer Live-Refresh OHNE Flackern: die (langsame) ORCH-Abfrage läuft
+# ERST in eine Variable — das alte Bild bleibt derweil stehen. Danach wird der
+# Cursor nur nach oben gesetzt (\033[H) und Zeile für Zeile überschrieben
+# (jede mit \033[K bis Zeilenende geräumt), am Ende Rest löschen (\033[J).
+# So kein 'clear' -> kein schwarzer Blitz zwischen den Frames.
 live_orch() {
   local title="$1"; shift
-  local iv=5
+  local iv=5 out header line
+  header="${C_TITLE}== ${title} ==${C_RST}   ${C_DIM}(Refresh ${iv}s · beliebige Taste = zurück)${C_RST}"
+  printf '\033[2J'   # einmal initial leeren
   while true; do
-    clear
-    echo -e "${C_TITLE}== ${title} ==${C_RST}   ${C_DIM}(Refresh ${iv}s · beliebige Taste = zurück)${C_RST}\n"
-    ORCH "$@" 2>/dev/null
+    out="$(ORCH "$@" 2>/dev/null)"
+    printf '\033[H'                       # Cursor nach oben links
+    printf '%b\033[K\n\033[K\n' "$header" # Kopfzeile + Leerzeile
+    while IFS= read -r line; do
+      printf '%s\033[K\n' "$line"         # ANSI aus ORCH bleibt erhalten (%s)
+    done <<<"$out"
+    printf '\033[J'                       # alles darunter (altes, längeres Bild) weg
     read -rsn1 -t "$iv" _ && return
   done
 }

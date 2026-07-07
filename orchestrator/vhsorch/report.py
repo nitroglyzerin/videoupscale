@@ -5,6 +5,7 @@ werden vom Menü in einer Auto-Refresh-Schleife aufgerufen ("aktiv pullen").
 """
 from __future__ import annotations
 
+import os
 import time
 
 from .config import Config
@@ -37,6 +38,43 @@ def _fmt_minutes(mins: float) -> str:
     return f"{mins/60:.1f}h"
 
 
+# Pipeline-Phasen in Reihenfolge (Schrittanzeige N/3).
+_PHASE_STEP = {"Denoise": "1/3", "Upscale": "2/3", "Audio": "3/3"}
+
+
+def _fmt_phase(phase: str, pct: str) -> str:
+    """'Upscale 2/3 42%' — Phase + Schritt + (falls vorhanden) Prozent."""
+    if not phase:
+        return ""
+    step = _PHASE_STEP.get(phase, "")
+    txt = f"{phase} {step}".strip()
+    if pct:
+        txt += f" {pct}"
+    return txt
+
+
+def _live_phase_map(cfg: Config, db: DB) -> dict[str, str]:
+    """Fragt alle bereiten Nodes live ab: Clip-Basisname -> 'Phase Schritt %'.
+
+    Clip-Schlüssel ist der Name OHNE Endung (so loggt ihn process.sh), damit er
+    zum DB-Dateinamen (mit Endung) über splitext gematcht werden kann. SSH-
+    Fehler einer Node werden geschluckt — die Anzeige darf nie crashen.
+    """
+    live: dict[str, str] = {}
+    for node in db.active_nodes():
+        if node["status"] != "ready" or not node["ssh_host"] or not node["ssh_port"]:
+            continue
+        r = Remote(node["ssh_host"], node["ssh_port"], cfg.ssh_key_path)
+        try:
+            activity = r.gpu_activity()
+        except Exception:  # noqa: BLE001 — Anzeige robust halten
+            continue
+        for _gpu, state, clip, phase, pct in activity:
+            if state == "busy" and clip:
+                live[clip] = _fmt_phase(phase, pct)
+    return live
+
+
 # ---------------------------------------------------------------------------
 #  Workmap: welche GPU welcher Node arbeitet gerade an welchem Video.
 # ---------------------------------------------------------------------------
@@ -66,17 +104,23 @@ def render_workmap(cfg: Config, db: DB, vast: VastClient) -> str:
             lines.append(f"  {_WARN}(nicht erreichbar: {e}){_RST}\n")
             continue
 
-        if not activity:
-            lines.append(f"  {_DIM}(keine GPU-Logs — Worker startet gleich){_RST}\n")
-            continue
-
-        for gpu, state, clip in activity:
-            total_gpus += 1
+        # Immer ALLE GPUs der Node zeigen — auch die, die noch keine Logdatei
+        # haben (gestaffelter Worker-Start: GPU N startet erst nach N×Stagger).
+        act_by_gpu = {gpu: (state, clip, phase, pct)
+                      for gpu, state, clip, phase, pct in activity}
+        ngpu = node["num_gpus"] or (max(act_by_gpu, default=-1) + 1)
+        total_gpus += ngpu
+        for gpu in range(ngpu):
+            state, clip, phase, pct = act_by_gpu.get(gpu, ("waiting", "", "", ""))
             if state == "busy" and clip:
                 total_busy += 1
-                lines.append(f"  {_OK}● GPU {gpu}{_RST}  ▶ {clip}")
-            else:
+                ph = _fmt_phase(phase, pct)
+                tail = f"   {_WARN}[{ph}]{_RST}" if ph else ""
+                lines.append(f"  {_OK}● GPU {gpu}{_RST}  ▶ {clip}{tail}")
+            elif state == "idle":
                 lines.append(f"  {_DIM}○ GPU {gpu}   (frei / zwischen Clips){_RST}")
+            else:
+                lines.append(f"  {_WARN}◌ GPU {gpu}{_RST}   {_DIM}(startet noch …){_RST}")
         lines.append("")
 
     counts = db.counts()
@@ -103,6 +147,9 @@ def render_videos(cfg: Config, db: DB, limit: int | None = None) -> str:
     if not rows:
         return f"{_DIM}Noch keine Clips in der Queue.{_RST}"
 
+    # Live-Phase/Prozent der gerade laufenden Clips (SSH zu den Nodes).
+    live = _live_phase_map(cfg, db)
+
     est_total = 0.0
     active_min = 0.0
     body: list[str] = []
@@ -127,12 +174,15 @@ def render_videos(cfg: Config, db: DB, limit: int | None = None) -> str:
 
         label, color = _STATUS_LABEL.get(status, (status, _RST))
         gpu_short = (gpu_name or "—").replace("RTX ", "")
+        # Läuft dieser Clip gerade auf einer GPU? Dann Phase + % anhängen.
+        phase_txt = live.get(os.path.splitext(c["name"])[0], "")
+        tail = f"  {_WARN}[{phase_txt}]{_RST}" if phase_txt else ""
         if limit is None or shown < limit:
             body.append(
                 f"  {color}{label:<11}{_RST} "
                 f"{_fmt_minutes(minutes):>6} ×{factor:>3.1f}  "
                 f"{_OK if cost else _DIM}{cost:>7.3f} ${_RST}  "
-                f"{_DIM}{gpu_short:<6}{_RST} {c['name']}"
+                f"{_DIM}{gpu_short:<6}{_RST} {c['name']}{tail}"
             )
             shown += 1
 

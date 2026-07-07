@@ -124,8 +124,22 @@ def cmd_workmap(cfg: Config, args) -> int:
 def cmd_videos(cfg: Config, args) -> int:
     """Video-Liste mit Zustand + Kostenschätzung (gesamt und pro Video)."""
     db = DB(cfg.db_path)
+    # Vor der Anzeige verwaiste Clips (tote Node, nie eingesammelt) heilen,
+    # damit die Liste nicht faelschlich 'zugewiesen' zeigt.
+    orphans = db.reassign_orphan_clips()
     limit = None if getattr(args, "all", False) else args.limit
     print(report.render_videos(cfg, db, limit=limit))
+    if orphans:
+        print(f"\n{report._WARN}{orphans} verwaiste Clips (tote Node) "
+              f"zurück auf 'wartet' gesetzt.{report._RST}")
+    return 0
+
+
+def cmd_reconcile(cfg: Config, args) -> int:
+    """Setzt verwaiste Clips (Node zerstört, Ergebnis nie geholt) zurück."""
+    db = DB(cfg.db_path)
+    n = db.reassign_orphan_clips()
+    print(f"{n} verwaiste Clips zurück auf 'pending' gesetzt.")
     return 0
 
 
@@ -176,6 +190,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="max. Zeilen (Default 40)")
     sp.add_argument("--all", action="store_true", help="alle Clips zeigen")
     sp.set_defaults(func=cmd_videos)
+
+    sp = sub.add_parser("reconcile", help="verwaiste Clips (tote Node) zurücksetzen")
+    sp.set_defaults(func=cmd_reconcile)
 
     sp = sub.add_parser("destroy", help="Instanz(en) zerstören: <id> oder 'all'")
     sp.add_argument("target")

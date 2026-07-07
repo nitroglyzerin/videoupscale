@@ -78,7 +78,7 @@ class Config:
         return cls(
             vast_api_key=api_key,
             vast_image=os.environ.get(
-                "VAST_IMAGE", "pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel"
+                "VAST_IMAGE", "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel"
             ).strip(),
             vast_disk_gb=int(os.environ.get("VAST_DISK_GB", "320")),
             ssh_key_path=os.environ.get("SSH_KEY_PATH", "/secrets/id_ed25519").strip(),

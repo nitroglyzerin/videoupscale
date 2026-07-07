@@ -64,7 +64,35 @@ else
   log "WARNUNG: keine requirements.txt in $SEEDVR2_DIR gefunden — überspringe."
 fi
 
-# SageAttention + Triton sind unsere Attention-Backends.
+# --- 4b. Blackwell/sm_120-Guard: kann PyTorch die GPU ansteuern? -------------
+# RTX 5090 = compute cap 12.0 (sm_120). PyTorch-Builds mit CUDA < 12.8 haben
+# KEINE sm_120-Kernel -> schon torch.randn(...,device='cuda') scheitert mit
+# "no kernel image is available for execution on the device". Wir prüfen das
+# und installieren bei Bedarf den cu128-Build nach (self-healing).
+gpu_probe() {
+  python3 - <<'PY' 2>/dev/null
+import torch
+torch.randn(8, 8, dtype=torch.bfloat16, device="cuda:0")
+print("ok")
+PY
+}
+log "Prüfe, ob PyTorch die GPU ansteuern kann (Blackwell/sm_120) …"
+if [ "$(gpu_probe)" != "ok" ]; then
+  log "PyTorch kann die GPU nicht ansteuern — installiere cu128-Build (sm_120) …"
+  $PIP install --upgrade --force-reinstall torch torchvision \
+    --index-url https://download.pytorch.org/whl/cu128
+  if [ "$(gpu_probe)" != "ok" ]; then
+    die "PyTorch steuert die 5090 (sm_120) weiterhin nicht an. Nutze ein \
+CUDA-12.8-Image (VAST_IMAGE) und prüfe den GPU-Treiber (>= 570). Abbruch, \
+statt still jeden Clip fehlschlagen zu lassen."
+  fi
+  log "cu128-Build installiert — GPU jetzt ansteuerbar."
+else
+  log "PyTorch steuert die GPU an — ok."
+fi
+
+# SageAttention + Triton sind unsere Attention-Backends. SageAttention baut
+# CUDA-Kernel für sm_120 -> braucht nvcc aus einem CUDA-12.8-Image.
 log "Installiere sageattention + triton …"
 $PIP install sageattention triton
 

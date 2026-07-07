@@ -74,6 +74,13 @@ class Scheduler:
                         self.db.update_node(iid, status="ready")
                         log(f"Node {iid} ist READY (bootstrap abgeschlossen).")
 
+        # Selbstheilung: Clips, deren Node inzwischen tot ist (auch außerhalb
+        # dieses Loops zerstört), zurück in die Queue — sonst haengen sie
+        # dauerhaft auf 'assigned'/'uploaded' ohne je fertig zu werden.
+        orphans = self.db.reassign_orphan_clips()
+        if orphans:
+            log(f"{orphans} verwaiste Clips (tote Node) neu eingereiht.")
+
     # -- Verteilung -----------------------------------------------------------
     def distribute(self) -> None:
         """Weist pending Clips kapazitätsgewichtet den ready-Nodes zu."""

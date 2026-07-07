@@ -84,8 +84,8 @@ class Remote:
             return []
         return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
-    def gpu_activity(self) -> list[tuple[int, str, str]]:
-        """Was gerade auf jeder GPU läuft — aus den Worker-Logs abgeleitet.
+    def gpu_activity(self) -> list[tuple[int, str, str, str, str]]:
+        """Was gerade auf jeder GPU läuft — aus Worker-Logs + Work-Dateien.
 
         process.sh loggt pro GPU nach /workspace/work/logs/gpu<idx>.log Zeilen
         wie 'START: <clip>' bzw. 'FERTIG: <clip> -> ...'. Die jeweils letzte
@@ -93,28 +93,43 @@ class Remote:
           * letzte Marke START  -> GPU verarbeitet aktuell <clip>  (state 'busy')
           * letzte Marke FERTIG/SKIP -> GPU ist zwischen Clips     (state 'idle')
 
-        Rückgabe: Liste (gpu_index, state, clip) sortiert nach GPU-Index.
+        Für einen laufenden Clip wird zusätzlich die PHASE aus den vorhandenen
+        Zwischendateien abgeleitet (die Pipeline schreibt sie der Reihe nach):
+          * <clip>.dechroma.mp4 fehlt          -> 'Denoise'  (Phase 1/3)
+          * .dechroma.mp4 da, .up.mp4 fehlt     -> 'Upscale'  (Phase 2/3, längste)
+          * .up.mp4 da, final fehlt             -> 'Audio'    (Phase 3/3)
+        PROZENT = der zuletzt im Log gesehene tqdm-Wert (v. a. beim Upscale),
+        sonst leer.
+
+        Rückgabe: Liste (gpu_index, state, clip, phase, percent), nach Index.
         """
         snippet = (
-            'shopt -s nullglob; '
-            'for f in /workspace/work/logs/gpu*.log; do '
-            '  g=$(basename "$f" .log); g=${g#gpu}; '
-            '  line=$(grep -aE "START:|FERTIG:|SKIP" "$f" | tail -1); '
+            'W=/workspace/work; F=/workspace/final; shopt -s nullglob; '
+            'for lf in "$W"/logs/gpu*.log; do '
+            '  g=$(basename "$lf" .log); g=${g#gpu}; '
+            '  line=$(grep -aE "START:|FERTIG:|SKIP" "$lf" | tail -1); '
             '  case "$line" in '
-            '    *START:*)  echo "$g|busy|${line#*START: }" ;; '
-            '    *)         echo "$g|idle|" ;; '
+            '    *START:*) clip=${line#*START: } ;; '
+            '    *) echo "$g|idle|||"; continue ;; '
             '  esac; '
+            '  if   [ -f "$F/$clip.mp4" ];          then ph=Audio; '
+            '  elif [ -f "$W/$clip.up.mp4" ];       then ph=Audio; '
+            '  elif [ -f "$W/$clip.dechroma.mp4" ]; then ph=Upscale; '
+            '  else                                      ph=Denoise; fi; '
+            '  pct=$(tail -n 60 "$lf" | grep -oaE "[0-9]+%" | tail -1); '
+            '  echo "$g|busy|$ph|$pct|$clip"; '
             'done'
         )
         res = self.exec(snippet, timeout=30)
         if res.returncode != 0:
             return []
-        out: list[tuple[int, str, str]] = []
+        out: list[tuple[int, str, str, str, str]] = []
         for line in res.stdout.splitlines():
-            parts = line.split("|", 2)
-            if len(parts) != 3 or not parts[0].isdigit():
+            parts = line.split("|", 4)
+            if len(parts) != 5 or not parts[0].isdigit():
                 continue
-            out.append((int(parts[0]), parts[1], parts[2].strip()))
+            gpu, state, phase, pct, clip = parts
+            out.append((int(gpu), state, clip.strip(), phase.strip(), pct.strip()))
         return sorted(out, key=lambda t: t[0])
 
     def worker_running(self) -> bool:
