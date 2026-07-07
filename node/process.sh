@@ -102,17 +102,29 @@ process_clip() {
         -c:v libx264 -crf 14 -preset slow \
         "$dechroma" </dev/null; then
     warn "[GPU $gpu] De-Chroma fehlgeschlagen: $name — überspringe Clip."
+    log "[GPU $gpu] FAIL: $name"
     return 1
   fi
 
   # --- 2. SeedVR2-Upscale ------------------------------------------------
-  # Eigener torch.compile-Cache PRO GPU -> verhindert die Kollision, wenn
-  # mehrere Worker parallel kompilieren (/tmp/torchinductor_root wäre geteilt).
+  # GPU-ISOLATION per CUDA_VISIBLE_DEVICES statt --cuda_device:
+  # inference_cli.py/Torch sprechen intern teils fest cuda:0 an. Übergibt man
+  # nur --cuda_device N (N>0), landen die Worker 1/2/3 im Leeren (0 MiB, 0 %)
+  # während GPU 0 als einzige rechnet. Mit CUDA_VISIBLE_DEVICES sieht JEDER
+  # Prozess ausschließlich SEINE physische Karte — und zwar als Index 0. Wir
+  # geben deshalb konsequent --cuda_device 0.
+  #
+  # Caches PRO GPU: nicht nur der torch.inductor-Cache muss getrennt sein,
+  # sondern AUCH der Triton-Cache. SageAttention/Triton kompilieren sonst alle
+  # in das geteilte ~/.triton/cache -> Lock-Contention beim Erst-Compile
+  # serialisiert die Worker (nur eine GPU „arbeitet" sichtbar).
   local cache_dir="$TMP_DIR/inductor_gpu${gpu}"
-  mkdir -p "$cache_dir"
+  mkdir -p "$cache_dir" "$cache_dir/triton"
 
   log "[GPU $gpu] PHASE Upscale: $name"
-  if ! TORCHINDUCTOR_CACHE_DIR="$cache_dir" \
+  if ! CUDA_VISIBLE_DEVICES="$gpu" \
+       TORCHINDUCTOR_CACHE_DIR="$cache_dir" \
+       TRITON_CACHE_DIR="$cache_dir/triton" \
        python3 "$SEEDVR2_DIR/inference_cli.py" "$dechroma" \
         --output "$upscaled" \
         --output_format mp4 \
@@ -123,8 +135,9 @@ process_clip() {
         --compile_dit --compile_vae \
         --attention_mode "$ATTENTION_MODE" \
         --video_backend "$VIDEO_BACKEND" \
-        --cuda_device "$gpu" </dev/null; then
+        --cuda_device 0 </dev/null; then
     warn "[GPU $gpu] SeedVR2-Upscale fehlgeschlagen: $name — überspringe Clip."
+    log "[GPU $gpu] FAIL: $name"   # Marker für den Monitor (busy=0, sichtbar als Fehler)
     rm -f "$dechroma"
     return 1
   fi
@@ -144,12 +157,14 @@ process_clip() {
           -c:v libx264 -crf 16 -c:a aac \
           "$final" </dev/null; then
       warn "[GPU $gpu] Audio-Remux fehlgeschlagen: $name — überspringe Clip."
+      log "[GPU $gpu] FAIL: $name"
       return 1
     fi
   else
     log "[GPU $gpu] Keine Audiospur — schreibe nur Video: $name"
     if ! ffmpeg -y -i "$upscaled" -map 0:v -c:v copy "$final" </dev/null; then
       warn "[GPU $gpu] Video-Schreiben fehlgeschlagen: $name — überspringe Clip."
+      log "[GPU $gpu] FAIL: $name"
       return 1
     fi
   fi
@@ -191,25 +206,13 @@ worker() {
   log "[GPU $gpu] Worker startet in ${delay}s …"
   sleep "$delay"
 
-  # Modell-Download-Wettlauf vermeiden: Nur GPU 0 lädt das Modell (~3 GB) beim
-  # ersten Clip herunter. SeedVR2 lädt nach <datei>.download und benennt dann
-  # um — laufen mehrere Worker parallel, reißen sie sich die Temp-Datei weg und
-  # sterben ("No such file: ...download -> ..."). Deshalb warten GPU 1/2/3, bis
-  # GPU 0 mit dem Encoding begonnen hat (= Modell liegt fertig auf Platte), und
-  # laden es dann von dort (kein Download mehr).
-  if [ "$gpu" -ne 0 ]; then
-    log "[GPU $gpu] wartet auf Modell (Erst-Download durch GPU 0) …"
-    local waited=0
-    while ! grep -qaE "Encoding batch|Materializing|Phase 1" \
-              "$WORK_DIR/logs/gpu0.log" 2>/dev/null; do
-      sleep 10; waited=$(( waited + 10 ))
-      if [ "$waited" -ge 900 ]; then
-        warn "[GPU $gpu] Timeout (15 min) beim Warten auf Modell — starte trotzdem."
-        break
-      fi
-    done
-    log "[GPU $gpu] Modell bereit — starte Verarbeitung."
-  fi
+  # HINWEIS: Die frühere Modell-Warteschleife (GPU 1/2/3 warten auf einen
+  # Log-Marker von GPU 0) ist ENTFERNT. Sie sollte den .download-Wettlauf
+  # verhindern — aber bootstrap.sh lädt das Modell inzwischen EINMAL atomar
+  # vorab (models/SEEDVR2/<datei> liegt fertig auf Platte), also gibt es zur
+  # Laufzeit gar keinen Download und keinen Wettlauf mehr. Die Warteschleife
+  # serialisierte den Start nur (bis zu 15 min) und trug so dazu bei, dass
+  # sichtbar „nur eine GPU arbeitet". Alle Worker starten jetzt sofort.
 
   # Endlos abgreifen, bis die Node zerstört wird (Orchestrator bei leerer
   # Queue). Kein Selbst-Exit nötig — die Node wird von außen abgeräumt.

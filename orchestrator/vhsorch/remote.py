@@ -92,7 +92,7 @@ class Remote:
           START: <clip>  ->  PHASE Denoise/Upscale/Audio: <clip>  ->  FERTIG: <clip>
 
         Ein awk-Durchlauf hält den ZULETZT gesehenen Zustand fest (monoton):
-          * busy=1 ab START, wieder 0 bei FERTIG/SKIP,
+          * busy=1 ab START, wieder 0 bei FERTIG/FAIL/SKIP,
           * die zuletzt geloggte PHASE-Marke ist die aktuelle Phase.
         Das ist bewusst NICHT an der Existenz der Zwischendateien festgemacht:
         ffmpeg/SeedVR2 legen ihre Output-Datei schon beim START der Phase an,
@@ -111,6 +111,7 @@ class Remote:
             /START: /  { busy=1; c=$0; sub(/.*START: /,"",c); clip=c; ph="" }
             /PHASE /   { p=$0; sub(/.*PHASE /,"",p); sub(/:.*/,"",p); ph=p }
             /FERTIG:/  { busy=0 }
+            /FAIL:/    { busy=0 }
             /SKIP/     { busy=0 }
             END { printf "%d|%s|%s", busy+0, ph, clip }
           ' "$lf")
