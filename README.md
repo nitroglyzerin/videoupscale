@@ -47,9 +47,11 @@ chmod 600 secrets/id_ed25519
 # -> den ÖFFENTLICHEN Teil (secrets/id_ed25519.pub) in deinem Vast-Account
 #    hinterlegen: console.vast.ai → Account → SSH Keys. Sonst kein rsync-Zugang.
 
-# WD-Red-Batch-Ordner anlegen (siehe Sicherheitshinweis unten):
-#   /mnt/hassos/vhs-batch/raw   (Input)
-#   /mnt/hassos/vhs-batch/done  (Output)
+# WD-Red-Batch-Ordner auf dem Proxmox-Host (existiert bereits, rw in fstab):
+#   /mnt/hdd/vhs-batch/raw    (Input)
+#   /mnt/hdd/vhs-batch/done   (Output)
+# Er wird per LXC-bind-mount (mp0) als /data im LXC 101 sichtbar; docker-compose
+# mountet /data/raw + /data/done weiter (siehe Topologie unten).
 
 docker compose build
 ```
@@ -73,7 +75,7 @@ docker compose run --rm orchestrator book 12345678
 docker compose up -d          # startet `vhsorch run`
 docker compose logs -f        # Queue-Status + laufende Kosten live
 ```
-Rohclips einfach nach `/mnt/hassos/vhs-batch/raw/` legen (am besten per `mv`
+Rohclips einfach nach `/mnt/hdd/vhs-batch/raw/` legen (am besten per `mv`
 aus einem Staging-Ordner). Fertige landen in `…/done/`. Bei leerer Queue wird
 jede Node automatisch zerstört (`AUTO_DESTROY=1`).
 
@@ -88,12 +90,27 @@ docker compose run --rm orchestrator destroy all   # Not-Aus: alles zerstören
 
 ## Sicherheits-relevante Stellen (bewusst erklärt)
 
+### Proxmox-/LXC-Topologie (reale Verkabelung)
+
+```text
+Proxmox-Host   WD Red (ext4, Label hassos-data, /dev/sdb1, rw,nofail in fstab)
+  /mnt/hdd/vhs-batch/{raw,done}
+        │  bind-mount  (mp0: /mnt/hdd/vhs-batch,mp=/data  in /etc/pve/lxc/101.conf)
+        ▼
+LXC 101 (unprivileged, = Docker-Host)   /data/{raw,done}
+        │  docker volume  (docker-compose.yml)
+        ▼
+orchestrator-Container   /data/{raw,done}
+```
+Die HOST-Seite der Docker-Volumes ist deshalb `/data/...` (Pfad **im LXC**),
+nicht `/mnt/hdd/...` — letzteres existiert nur auf dem Proxmox-Host.
+
 ### rw-Mount der WD Red — strikt getrennt von Jellyfin
 In [orchestrator/docker-compose.yml](orchestrator/docker-compose.yml) wird **nur**
-das dedizierte Batch-Unterverzeichnis gemountet:
+der als `/data` sichtbare Batch-Ordner weitergemountet:
 ```yaml
-- /mnt/hassos/vhs-batch/raw:/data/raw:rw
-- /mnt/hassos/vhs-batch/done:/data/done:rw
+- /data/raw:/data/raw:rw     # = /mnt/hdd/vhs-batch/raw auf dem Proxmox-Host
+- /data/done:/data/done:rw   # = /mnt/hdd/vhs-batch/done
 ```
 Der Container sieht **nicht** die ganze Platte und **nicht** die Jellyfin-
 Medienstruktur — er kann ausschließlich innerhalb `vhs-batch/` schreiben. Das ist
@@ -169,3 +186,23 @@ Referenz-Durchsatz: 3B FP8 @ 720, batch 25 ≈ 2,66 fps/GPU (5090); 4 GPUs ≈ 1
 - **SeedVR2-CLI:** Entrypoint `inference_cli.py`, Modelle laden automatisch von
   HuggingFace nach `./models/SEEDVR2`. Flag-Namen ggf. gegen die aktuelle
   SeedVR2-README abgleichen (z. B. `--dit_model`).
+
+---
+
+## Troubleshooting: Docker-in-LXC (Proxmox)
+
+Der Orchestrator läuft als Docker-Container **innerhalb** des unprivileged
+LXC 101. Damit das funktioniert:
+
+- **Nesting muss an sein.** In `/etc/pve/lxc/101.conf` (auf dem Proxmox-Host)
+  muss `features: nesting=1` stehen.
+  Fehlt das, startet Docker im LXC nicht (typische Symptome: `docker` startet
+  nicht, `overlayfs`- oder cgroup-Fehler). Nach Änderung LXC neu starten:
+  `pct stop 101 && pct start 101`.
+- **Permission-Fehler auf `/data`?** Nicht am LXC-Mapping drehen — der
+  Host-Ordner ist bereits `chown 100000:100000` (= root im Container). Ursache
+  ist dann eine `user:`-Zeile im compose. Es gibt bewusst keine — Container
+  läuft als root.
+- **`/data/raw` leer im Container?** Prüfen, dass der bind-mount greift:
+  im LXC `ls /data/raw` muss die Rohclips zeigen. Wenn nicht, fehlt `mp0` in
+  `101.conf` oder der LXC wurde nach dem Hinzufügen nicht neu gestartet.

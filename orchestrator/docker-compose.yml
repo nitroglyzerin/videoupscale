@@ -1,20 +1,41 @@
 # ============================================================================
-#  Home-Orchestrator — läuft im Docker-LXC auf Proxmox VE 9.2
+#  Home-Orchestrator — läuft im Docker-LXC (LXC 101) auf Proxmox VE 9.2
 #
-#  SICHERHEITSHINWEISE (bitte lesen):
+#  TOPOLOGIE (wichtig für die Volume-Pfade unten):
 #
-#  1) rw-Mount der WD Red:
-#     Wir mounten NUR das dedizierte Batch-Unterverzeichnis
-#     /mnt/hassos/vhs-batch/ — NICHT die ganze Platte und NICHT die
-#     Jellyfin-Medienstruktur. Der Container kann so ausschließlich innerhalb
-#     dieses Ordners schreiben. Passe den linken Pfad an dein reales Mount an.
-#     Lege darunter `raw/` (Input) und `done/` (Output) an.
+#    Proxmox-Host        WD Red (ext4, Label hassos-data, /dev/sdb1, rw,nofail)
+#      /mnt/hdd/vhs-batch/{raw,done}
+#            │  Proxmox bind-mount  (mp0 in /etc/pve/lxc/101.conf:
+#            │                       mp0: /mnt/hdd/vhs-batch,mp=/data)
+#            ▼
+#    LXC 101 (unprivileged, = Docker-Host)
+#      /data/{raw,done}
+#            │  Docker volume-mount  (dieses compose)
+#            ▼
+#    orchestrator-Container
+#      /data/{raw,done}
 #
-#  2) API-Key & SSH-Key:
-#     - VAST_API_KEY kommt aus der .env-Datei (NICHT eingecheckt).
-#     - Der SSH-Private-Key wird read-only (:ro) als Secret-Verzeichnis
-#       gemountet. Er verlässt den Host nie und steht nur diesem Container
-#       zur Verfügung. Rechte am Key: chmod 600.
+#  Deshalb ist die HOST-Seite der Volumes hier `/data/...` (Pfad IM LXC),
+#  NICHT `/mnt/hdd/...` (das existiert nur auf dem Proxmox-Host, nicht im LXC).
+#
+#  SICHERHEITSHINWEISE:
+#
+#  1) rw-Mount der WD Red — strikt getrennt von Jellyfin:
+#     Der LXC sieht durch mp0 ausschließlich /mnt/hdd/vhs-batch (als /data),
+#     NICHT die ganze Platte und NICHT die Jellyfin-Medienstruktur. Der
+#     Container kann somit nur innerhalb dieses Batch-Ordners schreiben.
+#
+#  2) UID-Mapping (unprivileged LXC):
+#     Der Host-Ordner wurde `chown -R 100000:100000 /mnt/hdd/vhs-batch` gesetzt,
+#     wodurch er im LXC/Container dem root (UID 0) gehört. Der Container läuft
+#     daher bewusst als root (KEINE `user:`-Direktive). Kommen beim `up`
+#     Permission-Fehler auf /data, liegt es an einer `user:`-Zeile — nicht am
+#     LXC-Mapping (Schreibtest aus dem Container war erfolgreich).
+#
+#  3) API-Key & SSH-Key:
+#     - VAST_API_KEY kommt aus .env (in .gitignore, nie im Code).
+#     - Der SSH-Private-Key wird read-only (:ro) gemountet und verlässt den
+#       Host nie. Rechte am Key: chmod 600.
 # ============================================================================
 services:
   orchestrator:
@@ -22,6 +43,8 @@ services:
     image: vhsorch:latest
     container_name: vhsorch
     restart: unless-stopped
+    # KEINE `user:`-Direktive -> Container läuft als root, passend zum
+    # UID-Mapping 100000:100000 des unprivileged LXC (siehe Hinweis 2 oben).
     env_file:
       - .env
     environment:
@@ -31,9 +54,10 @@ services:
       STATE_DIR: /state
       SSH_KEY_PATH: /secrets/id_ed25519
     volumes:
-      # --- Daten: STRIKT nur das Batch-Unterverzeichnis der WD Red (rw) ------
-      - /mnt/hassos/vhs-batch/raw:/data/raw:rw
-      - /mnt/hassos/vhs-batch/done:/data/done:rw
+      # --- Daten: der im LXC als /data erscheinende Batch-Ordner der WD Red --
+      #     (Host-Seite = Pfad IM LXC 101, siehe Topologie oben)
+      - /data/raw:/data/raw:rw
+      - /data/done:/data/done:rw
       # --- State (SQLite-Queue, known_hosts): persistent, klein --------------
       - ./state:/state:rw
       # --- Secrets: SSH-Private-Key, read-only -------------------------------
