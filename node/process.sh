@@ -163,17 +163,19 @@ worker() {
   sleep "$delay"
 
   # Deterministische, stabile Reihenfolge über alle Worker hinweg.
+  # WICHTIG: leerzeichen-sicher iterieren (Dateinamen wie "1994-1  T06 V01.mp4").
+  # `for x in $(ls)` würde an Leerzeichen zerbrechen -> read-Schleife nutzen.
   local idx=0
-  shopt -s nullglob
-  for input in $(ls -1 "$INPUT_DIR" | sort); do
-    local path="$INPUT_DIR/$input"
+  while IFS= read -r base; do
+    [ -n "$base" ] || continue
+    local path="$INPUT_DIR/$base"
     [ -f "$path" ] || continue
     # round-robin: Clip idx gehört zu GPU (idx % NGPU).
     if [ $(( idx % NGPU )) -eq "$gpu" ]; then
       process_clip "$path" "$gpu" >>"$logfile" 2>&1
     fi
     idx=$(( idx + 1 ))
-  done
+  done < <(ls -1 "$INPUT_DIR" | sort)
   log "[GPU $gpu] Worker fertig."
 }
 
