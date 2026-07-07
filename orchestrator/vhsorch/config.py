@@ -12,6 +12,18 @@ def _bool(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
+# SeedVR2-Modelle: der Orchestrator hält sie EINMAL im Home-Cache (models_dir,
+# auf der WD Red) und pusht sie per rsync auf jede Node. Nodes laden NICHTS mehr
+# von HuggingFace (Node-Egress ist unzuverlässig: IPv6-only, TLS-Reset, 429).
+# Cache füllen mit `vhsorch fetch-models`. Name -> HF-Download-URL.
+SEEDVR2_MODEL_FILES = {
+    "seedvr2_ema_3b_fp8_e4m3fn.safetensors":
+        "https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+    "ema_vae_fp16.safetensors":
+        "https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/ema_vae_fp16.safetensors",
+}
+
+
 # Default-Rechenleistungs-Faktoren pro GPU-Typ (relative Upscale-Durchsatz-
 # Gewichtung). Substring-Match gegen gpu_name. Über GPU_COST_FACTORS
 # überschreibbar, z. B. "RTX 4090=1.0,RTX 5090=1.7".
@@ -48,6 +60,7 @@ class Config:
     raw_dir: str
     done_dir: str
     state_dir: str
+    models_dir: str   # Home-Cache der SeedVR2-Modelle (WD Red), wird auf Nodes gepusht
     # Bootstrap
     repo_raw_url: str
     # Scheduler
@@ -88,6 +101,7 @@ class Config:
             raw_dir=os.environ.get("RAW_DIR", "/data/raw").strip(),
             done_dir=os.environ.get("DONE_DIR", "/data/done").strip(),
             state_dir=os.environ.get("STATE_DIR", "/state").strip(),
+            models_dir=os.environ.get("MODELS_DIR", "/data/models").strip(),
             repo_raw_url=os.environ.get(
                 "REPO_RAW_URL",
                 "https://raw.githubusercontent.com/nitroglyzerin/videoupscale/main",

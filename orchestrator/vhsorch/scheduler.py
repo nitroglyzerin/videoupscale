@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import time
 
-from .config import Config
+from .config import Config, SEEDVR2_MODEL_FILES
 from .db import DB
 from .ingest import Ingest
 from .remote import Remote
@@ -129,6 +129,29 @@ class Scheduler:
             r = self._remote(node)
             if r is None:
                 continue
+
+            # SeedVR2-Modelle EINMAL auf die Node pushen (Nodes laden nichts von
+            # HF — Egress unzuverlässig). Der Worker darf ERST danach starten,
+            # sonst würde SeedVR2 die Modelle zur Laufzeit selbst nachladen wollen
+            # (der .download-Wettlauf, den wir vermeiden). models_pushed = Flag.
+            if not node["models_pushed"]:
+                have = all(
+                    os.path.isfile(os.path.join(self.cfg.models_dir, n))
+                    for n in SEEDVR2_MODEL_FILES
+                )
+                if not have:
+                    log(f"Node {iid}: SeedVR2-Modelle fehlen im Home-Cache "
+                        f"({self.cfg.models_dir}) — bitte 'vhsorch fetch-models' laufen "
+                        f"lassen. Worker startet nicht ohne Modelle.")
+                    continue
+                log(f"Node {iid}: pushe SeedVR2-Modelle (einmalig, ~4 GB) …")
+                if r.push_models(self.cfg.models_dir):
+                    self.db.update_node(iid, models_pushed=1)
+                    log(f"Node {iid}: Modelle bereitgestellt.")
+                else:
+                    log(f"Node {iid}: Modell-Push fehlgeschlagen/Timeout — "
+                        f"nächster Takt erneut. Worker wartet.")
+                    continue
 
             # Worker FRÜH starten (schon vor Upload-Ende), damit die Node
             # eintreffende Clips sofort abgreift -> Verarbeitung überlappt mit

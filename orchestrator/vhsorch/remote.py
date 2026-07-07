@@ -71,27 +71,64 @@ class Remote:
             # Fehlschlag zurückgeben, statt die Live-Anzeige zu blockieren.
             return subprocess.CompletedProcess(cmd, returncode=124, stdout="", stderr="")
 
-    def push_files(self, local_paths: list[str], remote_dir: str = "/workspace/input/") -> bool:
-        """Pusht eine Liste konkreter Dateien in remote_dir (delta, resumierbar)."""
+    def push_files(self, local_paths: list[str], remote_dir: str = "/workspace/input/",
+                   timeout: int = 900) -> bool:
+        """Pusht eine Liste konkreter Dateien in remote_dir (delta, resumierbar).
+
+        Mit hartem timeout + rsync --timeout: ein hängender Transfer darf den
+        (single-threaded, blockierenden) Scheduler-Tick NICHT einfrieren.
+        """
         if not local_paths:
             return True
         cmd = [
-            "rsync", "-az", "--partial", "--info=progress2",
+            "rsync", "-az", "--partial", "--timeout=120", "--info=progress2",
             "-e", self._rsync_e(),
             *local_paths,
             f"{self.target}:{remote_dir}",
         ]
-        return subprocess.run(cmd).returncode == 0
+        try:
+            return subprocess.run(cmd, timeout=timeout).returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
 
-    def pull_results(self, local_dir: str, remote_dir: str = "/workspace/final/") -> bool:
+    def pull_results(self, local_dir: str, remote_dir: str = "/workspace/final/",
+                     timeout: int = 900) -> bool:
         """Zieht fertige Clips von der Node (delta, überschreibt nur Neues)."""
         cmd = [
-            "rsync", "-az", "--partial", "--ignore-existing",
+            "rsync", "-az", "--partial", "--ignore-existing", "--timeout=120",
             "-e", self._rsync_e(),
             f"{self.target}:{remote_dir}",
             local_dir if local_dir.endswith("/") else local_dir + "/",
         ]
-        return subprocess.run(cmd).returncode == 0
+        try:
+            return subprocess.run(cmd, timeout=timeout).returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
+
+    def push_models(self, local_dir: str,
+                    remote_dir: str = "/workspace/seedvr2/models/SEEDVR2/",
+                    timeout: int = 2400) -> bool:
+        """rsync die vorab (zuhause) geladenen SeedVR2-Modelle auf die Node.
+
+        Einmal pro Node (Scheduler-Flag models_pushed). Idempotent via
+        --ignore-existing (bereits vorhandene Modelle werden übersprungen).
+        KEIN -z: safetensors sind kaum komprimierbar -> spart CPU. Harte
+        Timeouts, damit ein hängender 4-GB-Transfer den Tick nicht blockiert.
+        """
+        src = local_dir if local_dir.endswith("/") else local_dir + "/"
+        # Zielverzeichnis sicherstellen (rsync legt nur die letzte Komponente an).
+        self.exec(f"mkdir -p {remote_dir}", timeout=30)
+        cmd = [
+            "rsync", "-a", "--partial", "--ignore-existing", "--timeout=120",
+            "--info=progress2",
+            "-e", self._rsync_e(),
+            src,
+            f"{self.target}:{remote_dir}",
+        ]
+        try:
+            return subprocess.run(cmd, timeout=timeout).returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
 
     def list_remote_final(self, remote_dir: str = "/workspace/final") -> list[str]:
         """Listet die .mp4-Dateinamen im final-Ordner der Node."""

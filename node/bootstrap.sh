@@ -19,17 +19,10 @@ REPO_RAW_URL="${REPO_RAW_URL:-https://raw.githubusercontent.com/nitroglyzerin/vi
 SEEDVR2_REPO="https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git"
 SEEDVR2_DIR="/workspace/seedvr2"
 
-# SeedVR2 braucht ZWEI Modelle, beide unter ./models/SEEDVR2:
-#   1) DiT (fp8) — MUSS zum DIT_MODEL in process.sh passen.
-#   2) VAE (fp16) — lädt SeedVR2 sonst zur LAUFZEIT selbst nach. Genau da
-#      entsteht der .download-Wettlauf mehrerer Worker (No such file:
-#      ...download -> ...). Deshalb laden wir BEIDE hier EINMAL vorab (Abschnitt
-#      4c), damit zur Laufzeit KEIN Worker mehr irgendetwas herunterlädt.
-MODEL_NAME="${MODEL_NAME:-seedvr2_ema_3b_fp8_e4m3fn.safetensors}"
-MODEL_URL="${MODEL_URL:-https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/${MODEL_NAME}}"
-VAE_NAME="${VAE_NAME:-ema_vae_fp16.safetensors}"
-VAE_URL="${VAE_URL:-https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/${VAE_NAME}}"
-# process.sh macht `cd $SEEDVR2_DIR`, daher ist ./models/SEEDVR2 genau hier:
+# SeedVR2 braucht ZWEI Modelle (DiT fp8 + VAE fp16), beide unter ./models/SEEDVR2.
+# Sie werden NICHT mehr auf der Node geladen (Node-Egress unzuverlässig), sondern
+# vom Orchestrator per rsync gepusht (siehe Abschnitt 4c). Wir legen hier nur das
+# Verzeichnis an. process.sh macht `cd $SEEDVR2_DIR`, daher ist ./models/SEEDVR2 hier:
 MODEL_DIR="$SEEDVR2_DIR/models/SEEDVR2"
 
 log() { echo -e "\033[1;36m[bootstrap]\033[0m $*"; }
@@ -162,54 +155,15 @@ $PIP install sageattention triton
 # nicht gebraucht — SageAttention (sageattn_2) genügt vollständig.
 log "flash-attn wird bewusst NICHT installiert (SageAttention genügt)."
 
-# --- 4c. SeedVR2-Modelle VORAB laden (einmal, atomar) ------------------------
-# Grund: SeedVR2 lädt fehlende Modelle sonst beim ersten Clip zur Laufzeit nach
-# ./models/SEEDVR2/<datei>.download und benennt dann um. Laufen mehrere GPU-
-# Worker parallel, reißen sie sich die .download weg ("No such file:
-# ...download -> ...") und JEDER Clip scheitert. Wir laden ALLE benötigten
-# Modelle hier EINMAL, bevor je ein Worker startet -> kein Laufzeit-Download,
-# kein Wettlauf. SeedVR2 braucht ZWEI: das DiT (fp8, ~3 GB) UND den VAE (fp16).
+# --- 4c. SeedVR2-Modelle: NICHT von der Node laden ---------------------------
+# Der Node-Egress ist auf Vast unzuverlässig (IPv6-only-HF, TLS-Reset, 429) —
+# ein HF-Download hier lässt den Bootstrap regelmäßig hängen/scheitern. Deshalb
+# liefert der ORCHESTRATOR die Modelle per rsync-über-SSH (einmal pro Node,
+# stabiler Kanal). Wir legen hier nur das Zielverzeichnis an; die Dateien landen
+# durch den Push in $MODEL_DIR, BEVOR der Worker gestartet wird.
+status "6/7 Modell-Verzeichnis vorbereiten (Modelle kommen per rsync vom Orchestrator)"
 mkdir -p "$MODEL_DIR"
-
-# fetch_model <name> <url> <min_bytes>
-# Lädt EIN Modell atomar nach $MODEL_DIR/<name>, wenn es fehlt oder zu klein
-# ist (Ruine/HTML-Fehlerseite). min_bytes = untere Plausibilitätsgrenze.
-fetch_model() {
-  local name="$1" url="$2" min_bytes="$3"
-  local file="$MODEL_DIR/$name" sz
-  if [ -f "$file" ] && [ "$(stat -c%s "$file" 2>/dev/null || echo 0)" -ge "$min_bytes" ]; then
-    log "Modell bereits vorhanden ($name, $(du -h "$file" | cut -f1)) — kein Download."
-    return 0
-  fi
-  rm -f "$MODEL_DIR/$name".download "$file".part "$file" 2>/dev/null || true
-  for try in 1 2 3; do
-    log "Lade Modell vorab (Versuch $try/3): $name …"
-    # Wichtig gegen ewiges Hängen: HuggingFace lässt die Verbindung manchmal
-    # offen, schickt aber nichts (0 B/s). Ohne Timeout hängt curl unendlich.
-    #   --speed-limit/--speed-time: bricht ab, wenn > 60 s unter 10 KB/s,
-    #   --connect-timeout: Verbindungsaufbau max. 30 s,
-    #   -C -: bereits geladene Bytes fortsetzen statt 3 GB neu (Resume).
-    if curl -fL -C - --retry 5 --retry-delay 5 \
-         --connect-timeout 30 --speed-limit 10240 --speed-time 60 \
-         -o "$file.part" "$url"; then
-      sz="$(stat -c%s "$file.part" 2>/dev/null || echo 0)"
-      if [ "$sz" -ge "$min_bytes" ]; then
-        mv -f "$file.part" "$file"   # atomar an die Zielstelle
-        log "Modell vorab geladen: $file ($(du -h "$file" | cut -f1))"
-        return 0
-      fi
-      log "Datei zu klein ($sz B, erwartet >= $min_bytes) — verwerfe und lade neu."
-      rm -f "$file.part"   # zu klein = kaputt -> NICHT fortsetzen, frisch holen
-    fi
-    sleep 5
-  done
-  die "Modell-Download fehlgeschlagen ($name). Abbruch, statt jeden Clip an \
-fehlendem Modell scheitern zu lassen."
-}
-
-status "6/7 SeedVR2-Modelle (DiT ~3 GB + VAE) prüfen/laden"
-fetch_model "$MODEL_NAME" "$MODEL_URL" 3000000000   # DiT: ~3 GB
-fetch_model "$VAE_NAME"   "$VAE_URL"   50000000     # VAE: fp16, >= ~50 MB (HTML-Fehler < 1 MB)
+log "Kein HF-Download auf der Node — Modelle werden vom Orchestrator gepusht."
 
 # --- 5. Verarbeitungs-Script laden -------------------------------------------
 status "7/7 process.sh laden"

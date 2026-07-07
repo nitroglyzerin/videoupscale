@@ -152,6 +152,31 @@ def cmd_pull(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_fetch_models(cfg: Config, args) -> int:
+    """Füllt den Home-Modell-Cache (models_dir) einmalig von HuggingFace.
+
+    Läuft auf dem gut angebundenen Orchestrator (nicht auf den Nodes). Danach
+    pusht der Scheduler die Modelle per rsync auf jede Node (kein HF auf Nodes).
+    """
+    import os
+    import urllib.request
+    from .config import SEEDVR2_MODEL_FILES
+
+    os.makedirs(cfg.models_dir, exist_ok=True)
+    for name, url in SEEDVR2_MODEL_FILES.items():
+        dst = os.path.join(cfg.models_dir, name)
+        if os.path.isfile(dst) and os.path.getsize(dst) > 10_000_000:
+            print(f"{name}: bereits vorhanden ({os.path.getsize(dst)//1024//1024} MB) — überspringe.")
+            continue
+        print(f"lade {name} …")
+        tmp = dst + ".part"
+        urllib.request.urlretrieve(url, tmp)
+        os.replace(tmp, dst)
+        print(f"  fertig: {os.path.getsize(dst)//1024//1024} MB")
+    print(f"Modell-Cache bereit: {cfg.models_dir}")
+    return 0
+
+
 def cmd_reconcile(cfg: Config, args) -> int:
     """Setzt verwaiste Clips (Node zerstört, Ergebnis nie geholt) zurück."""
     db = DB(cfg.db_path)
@@ -210,6 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("pull", help="fertige Ergebnisse jetzt einsammeln (kein Verteilen/Destroy)")
     sp.set_defaults(func=cmd_pull)
+
+    sp = sub.add_parser("fetch-models", help="SeedVR2-Modelle einmalig in den Home-Cache laden")
+    sp.set_defaults(func=cmd_fetch_models)
 
     sp = sub.add_parser("reconcile", help="verwaiste Clips (tote Node) zurücksetzen")
     sp.set_defaults(func=cmd_reconcile)

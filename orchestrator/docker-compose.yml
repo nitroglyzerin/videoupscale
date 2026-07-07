@@ -52,12 +52,16 @@ services:
       RAW_DIR: /data/raw
       DONE_DIR: /data/done
       STATE_DIR: /state
+      MODELS_DIR: /data/models
       SSH_KEY_PATH: /secrets/id_ed25519
     volumes:
       # --- Daten: der im LXC als /data erscheinende Batch-Ordner der WD Red --
       #     (Host-Seite = Pfad IM LXC 101, siehe Topologie oben)
       - /data/raw:/data/raw:rw
       - /data/done:/data/done:rw
+      # --- Modell-Cache (SeedVR2 DiT+VAE, ~4 GB): WD Red, NICHT Boot-Disk! ----
+      #     Einmal per `vhsorch fetch-models` befüllt, dann per rsync auf Nodes.
+      - /data/models:/data/models:rw
       # --- State (SQLite-Queue, known_hosts): persistent, klein --------------
       - ./state:/state:rw
       # --- Secrets: SSH-Private-Key, read-only -------------------------------

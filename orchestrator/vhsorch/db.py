@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     status      TEXT NOT NULL,       -- booked|ready|draining|destroyed
     worker_started INTEGER DEFAULT 0,
     bootstrap_started INTEGER DEFAULT 0,  -- 1, sobald wir den Bootstrap per SSH angestoßen haben
+    models_pushed INTEGER DEFAULT 0,      -- 1, sobald die SeedVR2-Modelle auf die Node gepusht sind
     created_at  REAL
 );
 """
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS nodes (
 # ergänzen (CREATE TABLE IF NOT EXISTS ändert eine vorhandene Tabelle nicht).
 _MIGRATIONS = [
     "ALTER TABLE nodes ADD COLUMN bootstrap_started INTEGER DEFAULT 0",
+    "ALTER TABLE nodes ADD COLUMN models_pushed INTEGER DEFAULT 0",
 ]
 
 
