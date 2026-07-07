@@ -168,7 +168,11 @@ log "Kein HF-Download auf der Node — Modelle werden vom Orchestrator gepusht."
 # --- 5. Verarbeitungs-Script laden -------------------------------------------
 status "7/7 process.sh laden"
 log "Lade process.sh aus $REPO_RAW_URL …"
-curl -fsSL "$REPO_RAW_URL/node/process.sh" -o /workspace/process.sh
+# Mit Timeout + Retry: der Node-Egress zu GitHub ist wackelig; ein nacktes
+# curl -fsSL hing hier sonst endlos an einer stehengebliebenen Verbindung.
+# ?ts umgeht den raw.githubusercontent-CDN-Cache (frische Version).
+curl -fL --connect-timeout 15 --max-time 120 --retry 5 --retry-delay 3 \
+  -o /workspace/process.sh "$REPO_RAW_URL/node/process.sh?ts=$(date +%s)"
 chmod +x /workspace/process.sh
 log "process.sh installiert nach /workspace/process.sh"
 

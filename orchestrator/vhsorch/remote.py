@@ -162,7 +162,8 @@ class Remote:
             "test -e /workspace/.bootstrap.launched && exit 0; "
             "mkdir -p /workspace; "
             f'export REPO_RAW_URL=\"{repo_raw_url}\"; '
-            'curl -fsSL \"$REPO_RAW_URL/node/bootstrap.sh\" -o /workspace/bootstrap.sh && '
+            'curl -fL --connect-timeout 15 --max-time 90 --retry 5 --retry-delay 3 '
+            '\"$REPO_RAW_URL/node/bootstrap.sh?ts=$(date +%s)\" -o /workspace/bootstrap.sh && '
             "{ touch /workspace/.bootstrap.launched; "
             "setsid bash /workspace/bootstrap.sh >>/workspace/bootstrap.log 2>&1 </dev/null & }"
             "'"
