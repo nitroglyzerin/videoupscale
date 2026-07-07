@@ -19,11 +19,16 @@ REPO_RAW_URL="${REPO_RAW_URL:-https://raw.githubusercontent.com/nitroglyzerin/vi
 SEEDVR2_REPO="https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git"
 SEEDVR2_DIR="/workspace/seedvr2"
 
-# SeedVR2-DiT-Modell (fp8) — MUSS zum DIT_MODEL in process.sh passen.
-# Wird hier EINMAL vorab geladen (siehe Abschnitt 4c), damit zur Laufzeit kein
-# Worker mehr herunterladen muss.
+# SeedVR2 braucht ZWEI Modelle, beide unter ./models/SEEDVR2:
+#   1) DiT (fp8) — MUSS zum DIT_MODEL in process.sh passen.
+#   2) VAE (fp16) — lädt SeedVR2 sonst zur LAUFZEIT selbst nach. Genau da
+#      entsteht der .download-Wettlauf mehrerer Worker (No such file:
+#      ...download -> ...). Deshalb laden wir BEIDE hier EINMAL vorab (Abschnitt
+#      4c), damit zur Laufzeit KEIN Worker mehr irgendetwas herunterlädt.
 MODEL_NAME="${MODEL_NAME:-seedvr2_ema_3b_fp8_e4m3fn.safetensors}"
 MODEL_URL="${MODEL_URL:-https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/${MODEL_NAME}}"
+VAE_NAME="${VAE_NAME:-ema_vae_fp16.safetensors}"
+VAE_URL="${VAE_URL:-https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/${VAE_NAME}}"
 # process.sh macht `cd $SEEDVR2_DIR`, daher ist ./models/SEEDVR2 genau hier:
 MODEL_DIR="$SEEDVR2_DIR/models/SEEDVR2"
 
@@ -127,46 +132,47 @@ $PIP install sageattention triton
 # nicht gebraucht — SageAttention (sageattn_2) genügt vollständig.
 log "flash-attn wird bewusst NICHT installiert (SageAttention genügt)."
 
-# --- 4c. SeedVR2-Modell VORAB laden (einmal, atomar) -------------------------
-# Grund: SeedVR2 lädt das Modell sonst beim ersten Clip zur Laufzeit nach
+# --- 4c. SeedVR2-Modelle VORAB laden (einmal, atomar) ------------------------
+# Grund: SeedVR2 lädt fehlende Modelle sonst beim ersten Clip zur Laufzeit nach
 # ./models/SEEDVR2/<datei>.download und benennt dann um. Laufen mehrere GPU-
 # Worker parallel, reißen sie sich die .download weg ("No such file:
-# ...download -> ...") und JEDER Clip scheitert. Wir laden es hier EINMAL,
-# bevor je ein Worker startet -> kein Laufzeit-Download, kein Wettlauf.
-MODEL_FILE="$MODEL_DIR/$MODEL_NAME"
-MIN_BYTES=3000000000   # ~3 GB; kleiner = Ruine, neu laden
+# ...download -> ...") und JEDER Clip scheitert. Wir laden ALLE benötigten
+# Modelle hier EINMAL, bevor je ein Worker startet -> kein Laufzeit-Download,
+# kein Wettlauf. SeedVR2 braucht ZWEI: das DiT (fp8, ~3 GB) UND den VAE (fp16).
 mkdir -p "$MODEL_DIR"
 
-model_ok() {  # existiert und plausibel groß?
-  local sz
-  [ -f "$MODEL_FILE" ] || return 1
-  sz="$(stat -c%s "$MODEL_FILE" 2>/dev/null || echo 0)"
-  [ "$sz" -ge "$MIN_BYTES" ]
-}
-
-status "6/7 SeedVR2-Modell (~3 GB) prüfen/laden"
-if model_ok; then
-  log "Modell bereits vorhanden ($MODEL_NAME, $(du -h "$MODEL_FILE" | cut -f1)) — kein Download."
-else
-  rm -f "$MODEL_DIR"/*.download "$MODEL_FILE" 2>/dev/null || true
-  downloaded=0
+# fetch_model <name> <url> <min_bytes>
+# Lädt EIN Modell atomar nach $MODEL_DIR/<name>, wenn es fehlt oder zu klein
+# ist (Ruine/HTML-Fehlerseite). min_bytes = untere Plausibilitätsgrenze.
+fetch_model() {
+  local name="$1" url="$2" min_bytes="$3"
+  local file="$MODEL_DIR/$name" sz
+  if [ -f "$file" ] && [ "$(stat -c%s "$file" 2>/dev/null || echo 0)" -ge "$min_bytes" ]; then
+    log "Modell bereits vorhanden ($name, $(du -h "$file" | cut -f1)) — kein Download."
+    return 0
+  fi
+  rm -f "$MODEL_DIR/$name".download "$file".part "$file" 2>/dev/null || true
   for try in 1 2 3; do
-    log "Lade SeedVR2-Modell vorab (Versuch $try/3): $MODEL_NAME …"
-    if curl -fL --retry 3 --retry-delay 5 -o "$MODEL_FILE.part" "$MODEL_URL"; then
-      sz="$(stat -c%s "$MODEL_FILE.part" 2>/dev/null || echo 0)"
-      if [ "$sz" -ge "$MIN_BYTES" ]; then
-        mv -f "$MODEL_FILE.part" "$MODEL_FILE"   # atomar an die Zielstelle
-        downloaded=1; break
+    log "Lade Modell vorab (Versuch $try/3): $name …"
+    if curl -fL --retry 3 --retry-delay 5 -o "$file.part" "$url"; then
+      sz="$(stat -c%s "$file.part" 2>/dev/null || echo 0)"
+      if [ "$sz" -ge "$min_bytes" ]; then
+        mv -f "$file.part" "$file"   # atomar an die Zielstelle
+        log "Modell vorab geladen: $file ($(du -h "$file" | cut -f1))"
+        return 0
       fi
-      log "Datei zu klein ($sz B) — verwerfe und versuche erneut."
+      log "Datei zu klein ($sz B, erwartet >= $min_bytes) — verwerfe und versuche erneut."
     fi
-    rm -f "$MODEL_FILE.part"
+    rm -f "$file.part"
     sleep 5
   done
-  [ "$downloaded" -eq 1 ] || die "Modell-Download fehlgeschlagen ($MODEL_NAME). \
-Abbruch, statt jeden Clip an fehlendem Modell scheitern zu lassen."
-  log "Modell vorab geladen: $MODEL_FILE ($(du -h "$MODEL_FILE" | cut -f1))"
-fi
+  die "Modell-Download fehlgeschlagen ($name). Abbruch, statt jeden Clip an \
+fehlendem Modell scheitern zu lassen."
+}
+
+status "6/7 SeedVR2-Modelle (DiT ~3 GB + VAE) prüfen/laden"
+fetch_model "$MODEL_NAME" "$MODEL_URL" 3000000000   # DiT: ~3 GB
+fetch_model "$VAE_NAME"   "$VAE_URL"   50000000     # VAE: fp16, >= ~50 MB (HTML-Fehler < 1 MB)
 
 # --- 5. Verarbeitungs-Script laden -------------------------------------------
 status "7/7 process.sh laden"
