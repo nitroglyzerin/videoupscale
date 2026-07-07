@@ -84,6 +84,16 @@ class Remote:
             return []
         return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
+    def bootstrap_status(self, path: str = "/workspace/bootstrap.status") -> str:
+        """Letzte Bootstrap-Statuszeile der Node (leer, wenn noch nichts da).
+
+        bootstrap.sh schreibt bei jeder Phase eine Zeile dorthin. Solange die
+        Node "booked" ist (process.sh noch nicht da), zeigt der Orchestrator
+        diesen Text an -> sichtbarer Fortschritt statt blindes "booked".
+        """
+        res = self.exec(f"cat {path} 2>/dev/null || true", timeout=20)
+        return res.stdout.strip() if res.returncode == 0 else ""
+
     def gpu_activity(self) -> list[tuple[int, str, str, str, str]]:
         """Was gerade auf jeder GPU läuft — aus den Worker-Logs (Log-Marker).
 

@@ -150,7 +150,15 @@ def render_workmap(cfg: Config, db: DB, vast: VastClient) -> str:
 
         host, port = node["ssh_host"], node["ssh_port"]
         if node["status"] != "ready" or not host or not port:
-            lines.append(f"  {_DIM}(noch nicht bereit — bootet/wird eingerichtet){_RST}\n")
+            msg = "bootet/wird eingerichtet"
+            if host and port:
+                try:
+                    st = Remote(host, port, cfg.ssh_key_path).bootstrap_status()
+                    if st:
+                        msg = st
+                except Exception:  # noqa: BLE001 — Anzeige robust halten
+                    pass
+            lines.append(f"  {_DIM}(noch nicht bereit — {msg}){_RST}\n")
             continue
 
         r = Remote(host, port, cfg.ssh_key_path)

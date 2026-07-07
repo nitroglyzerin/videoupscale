@@ -30,9 +30,22 @@ MODEL_DIR="$SEEDVR2_DIR/models/SEEDVR2"
 log() { echo -e "\033[1;36m[bootstrap]\033[0m $*"; }
 die() { echo -e "\033[1;31m[bootstrap FEHLER]\033[0m $*" >&2; exit 1; }
 
+# --- Fortschritts-Status -----------------------------------------------------
+# Jede Phase schreibt EINE Zeile nach /workspace/bootstrap.status. Der
+# Orchestrator liest die Datei per SSH und zeigt sie an, solange die Node noch
+# "booked" ist -> statt minutenlang blindes "booked" sieht man den echten
+# Schritt. Bricht der Bootstrap ab (set -e), bleibt die letzte Phase bzw. die
+# FEHLER-Zeile (via ERR-Trap) stehen und verrät, WO es hakte.
+mkdir -p /workspace
+STATUS_FILE="/workspace/bootstrap.status"
+status() { echo "$(date +%H:%M:%S) | $*" > "$STATUS_FILE"; log "STATUS: $*"; }
+trap 'status "FEHLER in Zeile $LINENO — Bootstrap abgebrochen (siehe onstart-Log)"' ERR
+
+status "0/7 Bootstrap gestartet"
 log "Starte Node-Bootstrap …"
 
 # --- 1. System-Pakete: ffmpeg + git + rsync sicherstellen --------------------
+status "1/7 System-Pakete (ffmpeg, git, rsync, tmux)"
 if ! command -v ffmpeg >/dev/null 2>&1; then
   log "ffmpeg fehlt — installiere via apt-get …"
   export DEBIAN_FRONTEND=noninteractive
@@ -52,6 +65,7 @@ mkdir -p /workspace/input /workspace/work /workspace/final /workspace/tmp
 log "Verzeichnisse angelegt: input work final tmp"
 
 # --- 3. SeedVR2 klonen -------------------------------------------------------
+status "2/7 SeedVR2 klonen"
 if [ ! -d "$SEEDVR2_DIR/.git" ]; then
   log "Klone SeedVR2 nach $SEEDVR2_DIR …"
   git clone --depth 1 "$SEEDVR2_REPO" "$SEEDVR2_DIR"
@@ -65,6 +79,7 @@ cd "$SEEDVR2_DIR"
 PIP="python3 -m pip"
 $PIP install --upgrade pip
 
+status "3/7 pip: requirements.txt"
 if [ -f requirements.txt ]; then
   log "Installiere requirements.txt …"
   $PIP install -r requirements.txt
@@ -84,6 +99,7 @@ torch.randn(8, 8, dtype=torch.bfloat16, device="cuda:0")
 print("ok")
 PY
 }
+status "4/7 GPU-Probe (ggf. PyTorch cu128 nachinstallieren — kann dauern)"
 log "Prüfe, ob PyTorch die GPU ansteuern kann (Blackwell/sm_120) …"
 if [ "$(gpu_probe)" != "ok" ]; then
   log "PyTorch kann die GPU nicht ansteuern — installiere cu128-Build (sm_120) …"
@@ -103,6 +119,7 @@ fi
 
 # SageAttention + Triton sind unsere Attention-Backends. SageAttention baut
 # CUDA-Kernel für sm_120 -> braucht nvcc aus einem CUDA-12.8-Image.
+status "5/7 sageattention + triton"
 log "Installiere sageattention + triton …"
 $PIP install sageattention triton
 
@@ -127,6 +144,7 @@ model_ok() {  # existiert und plausibel groß?
   [ "$sz" -ge "$MIN_BYTES" ]
 }
 
+status "6/7 SeedVR2-Modell (~3 GB) prüfen/laden"
 if model_ok; then
   log "Modell bereits vorhanden ($MODEL_NAME, $(du -h "$MODEL_FILE" | cut -f1)) — kein Download."
 else
@@ -151,6 +169,7 @@ Abbruch, statt jeden Clip an fehlendem Modell scheitern zu lassen."
 fi
 
 # --- 5. Verarbeitungs-Script laden -------------------------------------------
+status "7/7 process.sh laden"
 log "Lade process.sh aus $REPO_RAW_URL …"
 curl -fsSL "$REPO_RAW_URL/node/process.sh" -o /workspace/process.sh
 chmod +x /workspace/process.sh
@@ -170,6 +189,7 @@ fi
 chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
 
 # --- Fertig ------------------------------------------------------------------
+status "READY — Node einsatzbereit"
 log "======================================================================"
 log " Node ist einsatzbereit."
 log "   SeedVR2:   $SEEDVR2_DIR"

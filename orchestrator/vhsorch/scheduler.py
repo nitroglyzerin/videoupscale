@@ -73,6 +73,12 @@ class Scheduler:
                     if res.stdout.strip() == "ok":
                         self.db.update_node(iid, status="ready")
                         log(f"Node {iid} ist READY (bootstrap abgeschlossen).")
+                    else:
+                        # Noch mitten im Bootstrap: den echten Schritt anzeigen,
+                        # statt still auf 'booked' zu verharren.
+                        st = r.bootstrap_status()
+                        log(f"Node {iid}: Bootstrap läuft — "
+                            f"{st or 'startet, noch keine Statuszeile …'}")
 
         # Selbstheilung: Clips, deren Node inzwischen tot ist (auch außerhalb
         # dieses Loops zerstört), zurück in die Queue — sonst haengen sie
