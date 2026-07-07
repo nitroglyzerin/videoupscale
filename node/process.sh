@@ -88,6 +88,9 @@ process_clip() {
   log "[GPU $gpu] START: $name"
 
   # --- 1. De-Chroma / Denoise --------------------------------------------
+  # Phasen-Marker: der Monitor liest die ZULETZT geloggte PHASE-Zeile (monoton,
+  # unabhängig davon, wann die Zwischendateien angelegt werden).
+  log "[GPU $gpu] PHASE Denoise: $name"
   if ! ffmpeg -y -i "$input" \
         -vf "hqdn3d=1:8:2:8" \
         -c:v libx264 -crf 14 -preset slow \
@@ -102,6 +105,7 @@ process_clip() {
   local cache_dir="$TMP_DIR/inductor_gpu${gpu}"
   mkdir -p "$cache_dir"
 
+  log "[GPU $gpu] PHASE Upscale: $name"
   if ! TORCHINDUCTOR_CACHE_DIR="$cache_dir" \
        python3 "$SEEDVR2_DIR/inference_cli.py" "$dechroma" \
         --output "$upscaled" \
@@ -122,6 +126,7 @@ process_clip() {
   # --- 3. Audio-Remux (robust) -------------------------------------------
   # Prüfe, ob der ORIGINAL-Clip eine Audiospur hat. Fehlender Ton darf den
   # Clip NICHT fehlschlagen lassen (realer Bug in der Vergangenheit).
+  log "[GPU $gpu] PHASE Audio: $name"
   local has_audio
   has_audio="$(ffprobe -v error -select_streams a \
                  -show_entries stream=index -of csv=p=0 "$input" 2>/dev/null | head -1)"

@@ -85,41 +85,44 @@ class Remote:
         return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
     def gpu_activity(self) -> list[tuple[int, str, str, str, str]]:
-        """Was gerade auf jeder GPU läuft — aus Worker-Logs + Work-Dateien.
+        """Was gerade auf jeder GPU läuft — aus den Worker-Logs (Log-Marker).
 
-        process.sh loggt pro GPU nach /workspace/work/logs/gpu<idx>.log Zeilen
-        wie 'START: <clip>' bzw. 'FERTIG: <clip> -> ...'. Die jeweils letzte
-        dieser Marken bestimmt den Zustand:
-          * letzte Marke START  -> GPU verarbeitet aktuell <clip>  (state 'busy')
-          * letzte Marke FERTIG/SKIP -> GPU ist zwischen Clips     (state 'idle')
+        process.sh loggt pro GPU nach /workspace/work/logs/gpu<idx>.log in
+        Reihenfolge:
+          START: <clip>  ->  PHASE Denoise/Upscale/Audio: <clip>  ->  FERTIG: <clip>
 
-        Für einen laufenden Clip wird zusätzlich die PHASE aus den vorhandenen
-        Zwischendateien abgeleitet (die Pipeline schreibt sie der Reihe nach):
-          * <clip>.dechroma.mp4 fehlt          -> 'Denoise'  (Phase 1/3)
-          * .dechroma.mp4 da, .up.mp4 fehlt     -> 'Upscale'  (Phase 2/3, längste)
-          * .up.mp4 da, final fehlt             -> 'Audio'    (Phase 3/3)
-        PROZENT = der zuletzt im Log gesehene tqdm-Wert (v. a. beim Upscale),
-        sonst leer.
+        Ein awk-Durchlauf hält den ZULETZT gesehenen Zustand fest (monoton):
+          * busy=1 ab START, wieder 0 bei FERTIG/SKIP,
+          * die zuletzt geloggte PHASE-Marke ist die aktuelle Phase.
+        Das ist bewusst NICHT an der Existenz der Zwischendateien festgemacht:
+        ffmpeg/SeedVR2 legen ihre Output-Datei schon beim START der Phase an,
+        wodurch die Datei-Heuristik jede Phase zu früh (und bei Fehler-Retries
+        sogar rückwärts) anzeigte.
+
+        PROZENT = zuletzt im Log gesehener tqdm-Wert (v. a. beim Upscale).
 
         Rückgabe: Liste (gpu_index, state, clip, phase, percent), nach Index.
         """
-        snippet = (
-            'W=/workspace/work; F=/workspace/final; shopt -s nullglob; '
-            'for lf in "$W"/logs/gpu*.log; do '
-            '  g=$(basename "$lf" .log); g=${g#gpu}; '
-            '  line=$(grep -aE "START:|FERTIG:|SKIP" "$lf" | tail -1); '
-            '  case "$line" in '
-            '    *START:*) clip=${line#*START: } ;; '
-            '    *) echo "$g|idle|||"; continue ;; '
-            '  esac; '
-            '  if   [ -f "$F/$clip.mp4" ];          then ph=Audio; '
-            '  elif [ -f "$W/$clip.up.mp4" ];       then ph=Audio; '
-            '  elif [ -f "$W/$clip.dechroma.mp4" ]; then ph=Upscale; '
-            '  else                                      ph=Denoise; fi; '
-            '  pct=$(tail -n 60 "$lf" | grep -oaE "[0-9]+%" | tail -1); '
-            '  echo "$g|busy|$ph|$pct|$clip"; '
-            'done'
-        )
+        snippet = r'''
+        shopt -s nullglob
+        for lf in /workspace/work/logs/gpu*.log; do
+          g=$(basename "$lf" .log); g=${g#gpu}
+          info=$(awk '
+            /START: /  { busy=1; c=$0; sub(/.*START: /,"",c); clip=c; ph="" }
+            /PHASE /   { p=$0; sub(/.*PHASE /,"",p); sub(/:.*/,"",p); ph=p }
+            /FERTIG:/  { busy=0 }
+            /SKIP/     { busy=0 }
+            END { printf "%d|%s|%s", busy+0, ph, clip }
+          ' "$lf")
+          IFS="|" read -r busy ph clip <<<"$info"
+          if [ "$busy" = "1" ] && [ -n "$clip" ]; then
+            pct=$(tail -n 80 "$lf" | grep -oaE "[0-9]+%" | tail -1)
+            echo "$g|busy|$ph|$pct|$clip"
+          else
+            echo "$g|idle|||"
+          fi
+        done
+        '''
         res = self.exec(snippet, timeout=30)
         if res.returncode != 0:
             return []
@@ -131,6 +134,29 @@ class Remote:
             gpu, state, phase, pct, clip = parts
             out.append((int(gpu), state, clip.strip(), phase.strip(), pct.strip()))
         return sorted(out, key=lambda t: t[0])
+
+    def gpu_stats(self) -> dict[int, tuple[int, int, int]]:
+        """Pro GPU: (Auslastung %, VRAM belegt MiB, VRAM gesamt MiB) via nvidia-smi.
+
+        Leeres Dict, wenn nvidia-smi fehlschlägt (Anzeige bleibt robust).
+        """
+        res = self.exec(
+            "nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total "
+            "--format=csv,noheader,nounits",
+            timeout=30,
+        )
+        if res.returncode != 0:
+            return {}
+        out: dict[int, tuple[int, int, int]] = {}
+        for line in res.stdout.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) != 4 or not parts[0].isdigit():
+                continue
+            try:
+                out[int(parts[0])] = (int(parts[1]), int(parts[2]), int(parts[3]))
+            except ValueError:
+                continue
+        return out
 
     def worker_running(self) -> bool:
         res = self.exec(f"{_PGREP_WORKER} >/dev/null 2>&1 && echo yes || echo no",

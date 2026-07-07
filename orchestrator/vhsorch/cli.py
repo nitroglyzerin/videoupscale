@@ -135,6 +135,23 @@ def cmd_videos(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_pull(cfg: Config, args) -> int:
+    """Nur einsammeln: fertige Ergebnisse von allen Nodes ziehen (RETTUNG).
+
+    Verteilt NICHTS und zerstört NICHTS — sicher, um vor einem geplanten
+    Destroy alle bereits fertigen Clips nach Hause zu holen. Kann beliebig oft
+    laufen (rsync ist idempotent).
+    """
+    db = DB(cfg.db_path)
+    sched = Scheduler(cfg, db, vast=None)   # vast wird von collect() nicht gebraucht
+    before = db.counts().get("done", 0)
+    sched.collect()
+    after = db.counts().get("done", 0)
+    print(f"Pull fertig. Heruntergeladen (done): {before} -> {after} "
+          f"(+{after - before}). Ziel: {cfg.done_dir}")
+    return 0
+
+
 def cmd_reconcile(cfg: Config, args) -> int:
     """Setzt verwaiste Clips (Node zerstört, Ergebnis nie geholt) zurück."""
     db = DB(cfg.db_path)
@@ -190,6 +207,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="max. Zeilen (Default 40)")
     sp.add_argument("--all", action="store_true", help="alle Clips zeigen")
     sp.set_defaults(func=cmd_videos)
+
+    sp = sub.add_parser("pull", help="fertige Ergebnisse jetzt einsammeln (kein Verteilen/Destroy)")
+    sp.set_defaults(func=cmd_pull)
 
     sp = sub.add_parser("reconcile", help="verwaiste Clips (tote Node) zurücksetzen")
     sp.set_defaults(func=cmd_reconcile)

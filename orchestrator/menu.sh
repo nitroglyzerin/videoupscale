@@ -73,8 +73,6 @@ choose() {
 # ---------------------------------------------------------------------------
 #  Aktionen
 # ---------------------------------------------------------------------------
-act_status()  { clear; echo -e "${C_TITLE}== Queue & Nodes ==${C_RST}\n"; ORCH status; pause; }
-
 # SSH-Optionen für die Node-Schnappschüsse (kurzer Timeout, kein Prompt).
 SSH_OPTS=(-i secrets/id_ed25519 -o StrictHostKeyChecking=accept-new
           -o UserKnownHostsFile=state/known_hosts -o ConnectTimeout=8
@@ -129,26 +127,6 @@ act_nodes() {
   pause
 }
 
-# Live-Monitor: aktualisiert sich automatisch, beliebige Taste = zurück.
-act_monitor() {
-  local iv=6
-  while true; do
-    clear
-    echo -e "${C_TITLE}== Live-Monitor ==${C_RST}   ${C_DIM}(Refresh ${iv}s · beliebige Taste = zurück)${C_RST}\n"
-    ORCH status 2>/dev/null
-    echo; echo -e "${C_TITLE}-- Nodes live --${C_RST}"
-    local eps ep; mapfile -t eps < <(node_endpoints)
-    if [ "${#eps[@]}" -eq 0 ]; then
-      echo "  (noch keine SSH-Endpunkte — Node bootet)"
-    else
-      for ep in "${eps[@]}"; do
-        echo -e "\n${C_DIM}» ${ep}${C_RST}"; node_snapshot "${ep%:*}" "${ep##*:}"
-      done
-    fi
-    # bis zu iv Sekunden auf eine Taste warten; Taste -> raus.
-    read -rsn1 -t "$iv" _ && return
-  done
-}
 
 # Generischer Live-Refresh OHNE Flackern: die (langsame) ORCH-Abfrage läuft
 # ERST in eine Variable — das alte Bild bleibt derweil stehen. Danach wird der
@@ -157,27 +135,53 @@ act_monitor() {
 # So kein 'clear' -> kein schwarzer Blitz zwischen den Frames.
 live_orch() {
   local title="$1"; shift
-  local iv=5 out line stamp rem
-  # Spinner + Sekunden-Countdown in der Kopfzeile: die (langsame) ORCH-Abfrage
-  # läuft nur alle iv s, aber die Kopfzeile wird JEDE Sekunde neu geschrieben
-  # (nur Zeile 1, Body bleibt stehen) -> man sieht runterzählen + Spinner.
+  local iv=5 lead=3                       # Refresh-Intervall / Vorlauf zum Nachladen
   local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' si=0
-  printf '\033[2J'   # einmal initial leeren
+  local tmp; tmp="$(mktemp)"
+  local body="" stamp="—" line status header
+  local pid="" fetching=0 ready=0 secs=0 tick=0
+
+  # Bei Verlassen laufenden Hintergrund-Fetch mitnehmen + Temp entfernen.
+  _lo_cleanup() { [ -n "$pid" ] && kill "$pid" 2>/dev/null; rm -f "$tmp"; }
+
+  printf '\033[2J'
+  # Ersten Fetch SOFORT (im Hintergrund) anstoßen -> kein schwarzer Bildschirm,
+  # stattdessen gleich Kopfzeile + Spinner sichtbar.
+  ORCH "$@" >"$tmp" 2>/dev/null & pid=$!; fetching=1
+
   while true; do
-    out="$(ORCH "$@" 2>/dev/null)"       # läuft ERST (altes Bild bleibt stehen)
-    stamp="$(date '+%H:%M:%S')"
-    printf '\033[H\033[K\n\033[K\n'       # zwei Kopfzeilen freihalten
-    while IFS= read -r line; do
-      printf '%s\033[K\n' "$line"         # ANSI aus ORCH bleibt erhalten (%s)
-    done <<<"$out"
-    printf '\033[J'                       # alles darunter (altes, längeres Bild) weg
-    # Countdown bis zum nächsten Refresh; Kopfzeile jede Sekunde aktualisieren.
-    for ((rem = iv; rem > 0; rem--)); do
-      printf '\033[H%b\033[K' \
-        "${C_TITLE}== ${title} ==${C_RST}   ${C_DIM}${spin:si:1} Stand: ${stamp} · nächster Refresh in ${rem}s · beliebige Taste = zurück${C_RST}"
-      si=$(((si + 1) % ${#spin}))
-      read -rsn1 -t 1 _ && { printf '\n'; return; }
-    done
+    # --- Kopfzeile (jede ~0.25 s, Body bleibt stehen) ---
+    if   [ "$secs" -gt 0 ];   then status="nächster Refresh in ${secs}s"
+    elif [ "$ready" -eq 1 ];  then status="aktualisiere …"
+    else                            status="lädt Daten …"; fi
+    header="${C_TITLE}== ${title} ==${C_RST}   ${C_DIM}${spin:si:1} Stand: ${stamp} · ${status} · beliebige Taste = zurück${C_RST}"
+    printf '\033[H%b\033[K' "$header"
+    si=$(((si + 1) % ${#spin}))
+
+    # --- Hintergrund-Fetch fertig? -> Ergebnis vormerken ---
+    if [ "$fetching" -eq 1 ] && ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null; pid=""; fetching=0; ready=1
+    fi
+
+    # --- Frisches Ergebnis einblenden: sofort (Erststart) oder wenn Countdown 0 ---
+    if [ "$ready" -eq 1 ] && [ "$secs" -le 0 ]; then
+      body="$(cat "$tmp")"; stamp="$(date '+%H:%M:%S')"; ready=0; secs=$iv
+      printf '\033[H%b\033[K\n\033[K\n' "$header"     # Kopf + Leerzeile
+      while IFS= read -r line; do printf '%s\033[K\n' "$line"; done <<<"$body"
+      printf '\033[J'                                 # Rest (altes, längeres Bild) weg
+    fi
+
+    # --- Prefetch: schon vor Ablauf nachladen, damit bei 0 Daten bereitstehen ---
+    if [ "$fetching" -eq 0 ] && [ "$ready" -eq 0 ] && [ "$secs" -gt 0 ] && [ "$secs" -le "$lead" ]; then
+      ORCH "$@" >"$tmp" 2>/dev/null & pid=$!; fetching=1
+    fi
+
+    # --- ~0.25 s warten; Taste = zurück ---
+    read -rsn1 -t 0.25 _ && { printf '\n'; _lo_cleanup; return; }
+
+    # --- Zeitbasis: alle 4 Ticks (~1 s) Countdown herunterzählen ---
+    tick=$((tick + 1))
+    if [ $((tick % 4)) -eq 0 ] && [ "$secs" -gt 0 ]; then secs=$((secs - 1)); fi
   done
 }
 
@@ -186,6 +190,14 @@ act_workmap() { live_orch "Workmap — GPU ▶ Video (live)" workmap; }
 
 # Video-Tab: Liste mit Zustand + Gesamtkosten oben + Kosten pro Video (live).
 act_videos()  { live_orch "Videos & Kosten (live)" videos; }
+
+# Pull: fertige Ergebnisse JETZT einsammeln (kein Verteilen, kein Destroy).
+# Rettung vor einem geplanten Destroy oder wenn der Loop nicht läuft.
+act_pull() {
+  clear; echo -e "${C_TITLE}== Pull — Ergebnisse einsammeln ==${C_RST}\n"
+  echo "Ziehe fertige Clips von allen bereiten Nodes …"; echo
+  ORCH pull; pause
+}
 
 # Offers suchen UND direkt daraus buchen (Zifferntaste -> Bestätigung -> book).
 act_plan() {
@@ -211,14 +223,6 @@ act_plan() {
   local oid="${ids[$REPLY]}"
   echo; read -rp "Offer $oid buchen? [j/N]: " ok
   [[ "$ok" =~ ^[jJyY]$ ]] || { echo "Abgebrochen."; pause; return; }
-  echo; ORCH book "$oid"; pause
-}
-
-act_book() {
-  clear; echo -e "${C_TITLE}== Node buchen ==${C_RST}\n"
-  echo "Zuerst 'plan' ausführen, um eine OFFER-ID zu bekommen."; echo
-  read -rp "OFFER-ID (leer = abbrechen): " oid
-  [ -z "$oid" ] && return
   echo; ORCH book "$oid"; pause
 }
 
@@ -260,16 +264,14 @@ act_ssh() {
 #  Hauptschleife
 # ---------------------------------------------------------------------------
 LABELS=(
-  "Workmap — LIVE: welche GPU ▶ welches Video (auto-refresh)"
+  "Workmap — LIVE: welche GPU ▶ welches Video + Auslastung (auto-refresh)"
   "Videos  — LIVE: Liste + Gesamtkosten + Kosten/Video (auto-refresh)"
-  "Status  — Queue & Nodes (Momentaufnahme)"
-  "Monitor — LIVE: Nodes, GPUs, Fortschritt (auto-refresh)"
   "Plan    — Offers suchen & direkt buchen"
-  "Book    — Node per ID buchen (manuell)"
   "Nodes   — Vast-Status + Live-Schnappschuss"
   "Up      — Loop starten (Hintergrund)"
   "Logs    — Loop-Logs live ansehen"
   "Down    — Loop stoppen"
+  "Pull    — fertige Ergebnisse jetzt einsammeln (kein Destroy)"
   "Destroy — Node(s) zerstören (Kostenstopp)"
   "SSH     — auf eine Node verbinden"
   "Beenden"
@@ -285,16 +287,14 @@ while true; do
   case "$REPLY" in
     0) act_workmap;;
     1) act_videos;;
-    2) act_status;;
-    3) act_monitor;;
-    4) act_plan;;
-    5) act_book;;
-    6) act_nodes;;
-    7) act_up;;
-    8) act_logs;;
-    9) act_down;;
-    10) act_destroy;;
-    11) act_ssh;;
-    12|255) clear; echo "Tschüss."; exit 0;;
+    2) act_plan;;
+    3) act_nodes;;
+    4) act_up;;
+    5) act_logs;;
+    6) act_down;;
+    7) act_pull;;
+    8) act_destroy;;
+    9) act_ssh;;
+    10|255) clear; echo "Tschüss."; exit 0;;
   esac
 done
