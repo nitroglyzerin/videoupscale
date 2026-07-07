@@ -81,10 +81,20 @@ class Remote:
         return res.stdout.strip() == "yes"
 
     def start_worker(self) -> bool:
-        """Startet process.sh abbruchsicher in tmux (überlebt SSH-Trennung)."""
+        """Startet process.sh abbruchsicher (überlebt SSH-Trennung).
+
+        Bevorzugt tmux (für `tmux attach`-Debugging); fällt auf setsid+nohup
+        zurück, falls tmux auf der Node fehlt — so startet der Worker immer und
+        scheitert nie still.
+        """
         cmd = (
-            "tmux has-session -t upscale 2>/dev/null || "
-            "tmux new-session -d -s upscale "
-            "'/workspace/process.sh 2>&1 | tee -a /workspace/work/run.log'"
+            "if command -v tmux >/dev/null 2>&1; then "
+            "  tmux has-session -t upscale 2>/dev/null || "
+            "  tmux new-session -d -s upscale "
+            "  '/workspace/process.sh 2>&1 | tee -a /workspace/work/run.log'; "
+            "else "
+            "  setsid bash -c 'nohup /workspace/process.sh "
+            ">> /workspace/work/run.log 2>&1 &' </dev/null; "
+            "fi"
         )
         return self.exec(cmd, timeout=60).returncode == 0

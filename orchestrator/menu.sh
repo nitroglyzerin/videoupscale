@@ -74,7 +74,81 @@ choose() {
 #  Aktionen
 # ---------------------------------------------------------------------------
 act_status()  { clear; echo -e "${C_TITLE}== Queue & Nodes ==${C_RST}\n"; ORCH status; pause; }
-act_nodes()   { clear; echo -e "${C_TITLE}== Laufende Vast-Instanzen ==${C_RST}\n"; ORCH nodes; pause; }
+
+# SSH-Optionen für die Node-Schnappschüsse (kurzer Timeout, kein Prompt).
+SSH_OPTS=(-i secrets/id_ed25519 -o StrictHostKeyChecking=accept-new
+          -o UserKnownHostsFile=state/known_hosts -o ConnectTimeout=8
+          -o BatchMode=yes)
+
+# ssh=host:port-Endpunkte der aktuellen Nodes holen.
+node_endpoints() { ORCH nodes 2>/dev/null | grep -oE 'ssh=[^ ]+' | sed 's/^ssh=//'; }
+
+# Ein-Blick-Schnappschuss EINER Node über SSH:
+#   Worker-Prozesse, fertige/gesamte Clips, GPU-Auslastung, letzte Log-Zeile.
+node_snapshot() {
+  local host="$1" port="$2"
+  local remote='
+    w=$(pgrep -c -f process.sh 2>/dev/null || echo 0)
+    fin=$(ls /workspace/final 2>/dev/null | grep -ic "\.mp4$")
+    inp=$(ls /workspace/input 2>/dev/null | wc -l)
+    echo "WORKER=$w"
+    echo "DONE=$fin/$inp"
+    echo "--- GPUs (idx util mem) ---"
+    nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total \
+               --format=csv,noheader 2>/dev/null || echo "  (nvidia-smi n/a)"
+    echo "--- letzte Aktivität ---"
+    tail -n 2 /workspace/work/run.log 2>/dev/null | sed "s/^/  /" || true
+  '
+  local out
+  if out="$(ssh "${SSH_OPTS[@]}" -p "$port" "root@$host" "$remote" 2>/dev/null)"; then
+    local worker done_
+    worker="$(echo "$out" | sed -n 's/^WORKER=//p')"
+    done_="$(echo  "$out" | sed -n 's/^DONE=//p')"
+    if [ "${worker:-0}" -gt 0 ] 2>/dev/null; then
+      echo -e "  ${C_OK}● Worker aktiv${C_RST} ($worker Prozesse)   fertig: ${C_OK}$done_${C_RST}"
+    else
+      echo -e "  ${C_WARN}○ kein Worker läuft${C_RST}            fertig: $done_"
+    fi
+    echo "$out" | sed -n '/^--- GPUs/,$p'
+  else
+    echo -e "  ${C_WARN}(nicht erreichbar — bootet noch oder SSH nicht bereit)${C_RST}"
+  fi
+}
+
+# Angereicherte, einmalige Nodes-Ansicht: Vast-Status + Live-Schnappschuss.
+act_nodes() {
+  clear; echo -e "${C_TITLE}== Nodes: Vast-Status ==${C_RST}\n"
+  ORCH nodes
+  echo; echo -e "${C_TITLE}== Live-Schnappschuss pro Node ==${C_RST}"
+  local eps ep; mapfile -t eps < <(node_endpoints)
+  if [ "${#eps[@]}" -eq 0 ]; then echo "  (noch keine SSH-Endpunkte)"; else
+    for ep in "${eps[@]}"; do
+      echo -e "\n${C_DIM}» ${ep}${C_RST}"; node_snapshot "${ep%:*}" "${ep##*:}"
+    done
+  fi
+  pause
+}
+
+# Live-Monitor: aktualisiert sich automatisch, beliebige Taste = zurück.
+act_monitor() {
+  local iv=6
+  while true; do
+    clear
+    echo -e "${C_TITLE}== Live-Monitor ==${C_RST}   ${C_DIM}(Refresh ${iv}s · beliebige Taste = zurück)${C_RST}\n"
+    ORCH status 2>/dev/null
+    echo; echo -e "${C_TITLE}-- Nodes live --${C_RST}"
+    local eps ep; mapfile -t eps < <(node_endpoints)
+    if [ "${#eps[@]}" -eq 0 ]; then
+      echo "  (noch keine SSH-Endpunkte — Node bootet)"
+    else
+      for ep in "${eps[@]}"; do
+        echo -e "\n${C_DIM}» ${ep}${C_RST}"; node_snapshot "${ep%:*}" "${ep##*:}"
+      done
+    fi
+    # bis zu iv Sekunden auf eine Taste warten; Taste -> raus.
+    read -rsn1 -t "$iv" _ && return
+  done
+}
 
 # Offers suchen UND direkt daraus buchen (Zifferntaste -> Bestätigung -> book).
 act_plan() {
@@ -149,10 +223,11 @@ act_ssh() {
 #  Hauptschleife
 # ---------------------------------------------------------------------------
 LABELS=(
-  "Status  — Queue & Nodes anzeigen"
+  "Status  — Queue & Nodes (Momentaufnahme)"
+  "Monitor — LIVE: Nodes, GPUs, Fortschritt (auto-refresh)"
   "Plan    — Offers suchen & direkt buchen"
   "Book    — Node per ID buchen (manuell)"
-  "Nodes   — laufende Vast-Instanzen"
+  "Nodes   — Vast-Status + Live-Schnappschuss"
   "Up      — Loop starten (Hintergrund)"
   "Logs    — Loop-Logs live ansehen"
   "Down    — Loop stoppen"
@@ -170,14 +245,15 @@ while true; do
   choose "${LABELS[@]}"
   case "$REPLY" in
     0) act_status;;
-    1) act_plan;;
-    2) act_book;;
-    3) act_nodes;;
-    4) act_up;;
-    5) act_logs;;
-    6) act_down;;
-    7) act_destroy;;
-    8) act_ssh;;
-    9|255) clear; echo "Tschüss."; exit 0;;
+    1) act_monitor;;
+    2) act_plan;;
+    3) act_book;;
+    4) act_nodes;;
+    5) act_up;;
+    6) act_logs;;
+    7) act_down;;
+    8) act_destroy;;
+    9) act_ssh;;
+    10|255) clear; echo "Tschüss."; exit 0;;
   esac
 done
