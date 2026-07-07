@@ -79,7 +79,9 @@ PY
 log "Prüfe, ob PyTorch die GPU ansteuern kann (Blackwell/sm_120) …"
 if [ "$(gpu_probe)" != "ok" ]; then
   log "PyTorch kann die GPU nicht ansteuern — installiere cu128-Build (sm_120) …"
-  $PIP install --upgrade --force-reinstall torch torchvision \
+  # WICHTIG: torch, torchvision UND torchaudio zusammen — sonst ABI-Mismatch
+  # (undefined symbol in libtorchaudio.so), der SeedVR2 bei jedem Clip crasht.
+  $PIP install --upgrade --force-reinstall torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
   if [ "$(gpu_probe)" != "ok" ]; then
     die "PyTorch steuert die 5090 (sm_120) weiterhin nicht an. Nutze ein \
