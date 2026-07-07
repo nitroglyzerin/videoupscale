@@ -15,6 +15,7 @@ sind bewusst schlank gehalten und leicht gegen die aktuelle Vast-Doku
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -71,16 +72,47 @@ class VastClient:
             {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
         )
 
-    def _req(self, method: str, path: str, base: str = API_BASE, **kw) -> Any:
-        url = f"{base}{path}"
-        resp = self._session.request(method, url, timeout=60, **kw)
-        if resp.status_code >= 400:
-            # API-Key wird nicht mitgeloggt (nur in Session-Header).
-            raise VastError(f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:400]}")
+    # Statuscodes, die sich mit kurzem Warten von selbst erledigen.
+    _RETRY_STATUS = {429, 502, 503, 504}
+
+    @staticmethod
+    def _retry_after_seconds(resp: requests.Response, attempt: int) -> float:
+        """Wartezeit vor dem nächsten Versuch: Retry-After-Header > JSON-Feld
+        'retry_after' > exponentieller Backoff. Gedeckelt auf 30 s."""
+        hdr = resp.headers.get("Retry-After")
+        if hdr:
+            try:
+                return min(float(hdr), 30.0)
+            except ValueError:
+                pass
         try:
-            return resp.json()
+            body = resp.json()
+            if isinstance(body, dict) and body.get("retry_after"):
+                # +0.5 s Puffer, damit wir nicht exakt am Limit wieder anklopfen.
+                return min(float(body["retry_after"]) + 0.5, 30.0)
         except ValueError:
-            return {}
+            pass
+        return min(2.0 ** attempt, 30.0)
+
+    def _req(self, method: str, path: str, base: str = API_BASE,
+             _retries: int = 4, **kw) -> Any:
+        url = f"{base}{path}"
+        for attempt in range(_retries + 1):
+            resp = self._session.request(method, url, timeout=60, **kw)
+            # Vast drosselt (429) oder ist kurz weg (5xx) -> warten und erneut.
+            if resp.status_code in self._RETRY_STATUS and attempt < _retries:
+                time.sleep(self._retry_after_seconds(resp, attempt))
+                continue
+            if resp.status_code >= 400:
+                # API-Key wird nicht mitgeloggt (nur in Session-Header).
+                raise VastError(
+                    f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:400]}")
+            try:
+                return resp.json()
+            except ValueError:
+                return {}
+        # Nach _retries erschöpften Versuchen: letzten Fehler sauberer melden.
+        raise VastError(f"{method} {path} -> nach {_retries} Retries weiter gedrosselt.")
 
     # --- Suche ---------------------------------------------------------------
     def search_offers(self, disk_gb: int, min_gpus: int = 4,
