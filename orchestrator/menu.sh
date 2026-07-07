@@ -247,22 +247,54 @@ act_destroy() {
   echo; ORCH destroy "$tgt"; pause
 }
 
+# Eine Node auswählen. Setzt PICKED_EP="host:port" und gibt 0 zurück; 1 bei
+# Abbruch oder wenn (noch) keine Node einen ssh-Endpoint hat. Von act_ssh UND
+# act_setup_logs genutzt, damit die Auswahl-Logik nur einmal existiert.
+pick_node() {
+  PICKED_EP=""
+  local eps
+  mapfile -t eps < <(node_endpoints)
+  if [ "${#eps[@]}" -eq 0 ]; then
+    echo "Keine erreichbaren Nodes (ssh-Endpoint noch nicht vergeben?)."; return 1
+  fi
+  if [ "${#eps[@]}" -eq 1 ]; then
+    PICKED_EP="${eps[0]}"; return 0
+  fi
+  echo "Node wählen:"; choose "${eps[@]}"; [ "$REPLY" -eq 255 ] && return 1
+  PICKED_EP="${eps[$REPLY]}"; return 0
+}
+
 act_ssh() {
   clear; echo -e "${C_TITLE}== SSH auf eine Node ==${C_RST}\n"
-  # ssh=host:port aus der nodes-Ausgabe ziehen.
-  mapfile -t eps < <(ORCH nodes 2>/dev/null | grep -oE 'ssh=[^ ]+' | sed 's/^ssh=//')
-  if [ "${#eps[@]}" -eq 0 ]; then
-    echo "Keine erreichbaren Nodes (ssh-Endpoint noch nicht vergeben?)."; pause; return
-  fi
-  local ep
-  if [ "${#eps[@]}" -eq 1 ]; then
-    ep="${eps[0]}"
-  else
-    echo "Node wählen:"; choose "${eps[@]}"; [ "$REPLY" -eq 255 ] && return; ep="${eps[$REPLY]}"
-  fi
-  local host="${ep%:*}" port="${ep##*:}"
+  pick_node || { pause; return; }
+  local host="${PICKED_EP%:*}" port="${PICKED_EP##*:}"
   echo -e "\nVerbinde zu ${C_OK}root@$host:$port${C_RST} …\n"
   ssh -p "$port" -i secrets/id_ed25519 -o StrictHostKeyChecking=accept-new "root@$host"
+  pause
+}
+
+# First-Setup-Logs (bootstrap.sh) einer Node LIVE mitlesen.
+# bootstrap.sh schreibt sein komplettes Log detached nach /workspace/bootstrap.log
+# (siehe remote.start_bootstrap). Wir hängen uns per 'tail -F' dran:
+#   -F  folgt der Datei auch, wenn sie NOCH NICHT existiert (Node bootet noch)
+#       oder rotiert wird -> kein Fehlschlag, sondern "waiting for output".
+# Strg-C beendet den tail und kehrt ins Menü zurück (wie bei den Loop-Logs).
+act_setup_logs() {
+  clear; echo -e "${C_TITLE}== First-Setup-Logs (bootstrap) live ==${C_RST}\n"
+  pick_node || { pause; return; }
+  local host="${PICKED_EP%:*}" port="${PICKED_EP##*:}"
+  echo -e "Folge ${C_OK}/workspace/bootstrap.log${C_RST} auf ${C_OK}root@$host:$port${C_RST}"
+  echo -e "${C_DIM}(Kurz-Status je Phase steht zusätzlich in /workspace/bootstrap.status)${C_RST}"
+  echo -e "${C_DIM}── Strg-C = zurück ──${C_RST}\n"
+  # Konsistent mit remote.py: keine Host-Key-Prüfung (Vast recycelt Hostnamen),
+  # ServerAlive hält die lange tail-Verbindung offen. Strg-C trifft nur den tail.
+  trap ' ' INT
+  ssh -tt -p "$port" -i secrets/id_ed25519 \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR -o ServerAliveInterval=15 \
+      "root@$host" \
+      "tail -n +1 -F /workspace/bootstrap.log"
+  trap - INT
   pause
 }
 
@@ -276,6 +308,7 @@ LABELS=(
   "Nodes   — Vast-Status + Live-Schnappschuss"
   "Up      — Loop starten (Hintergrund)"
   "Logs    — Loop-Logs live ansehen"
+  "Setup   — LIVE: First-Setup-Logs (bootstrap) einer Node mitlesen"
   "Down    — Loop stoppen"
   "Pull    — fertige Ergebnisse jetzt einsammeln (kein Destroy)"
   "Destroy — Node(s) zerstören (Kostenstopp)"
@@ -297,10 +330,11 @@ while true; do
     3) act_nodes;;
     4) act_up;;
     5) act_logs;;
-    6) act_down;;
-    7) act_pull;;
-    8) act_destroy;;
-    9) act_ssh;;
-    10|255) clear; echo "Tschüss."; exit 0;;
+    6) act_setup_logs;;
+    7) act_down;;
+    8) act_pull;;
+    9) act_destroy;;
+    10) act_ssh;;
+    11|255) clear; echo "Tschüss."; exit 0;;
   esac
 done
