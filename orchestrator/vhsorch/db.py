@@ -154,3 +154,20 @@ class DB:
 
     def all_nodes(self) -> list[sqlite3.Row]:
         return self._conn.execute("SELECT * FROM nodes ORDER BY created_at").fetchall()
+
+    # --- Reports (Clip x Node join) -----------------------------------------
+    def clips_with_gpu(self) -> list[sqlite3.Row]:
+        """Alle Clips samt GPU-Infos der zugewiesenen Node (LEFT JOIN).
+
+        Liefert zusätzlich zu den clip-Spalten: gpu_name, num_gpus, dph der
+        Node (NULL bei noch nicht zugewiesenen Clips). Basis für die
+        Video-/Kostenübersicht.
+        """
+        return self._conn.execute(
+            "SELECT c.*, n.gpu_name AS gpu_name, n.num_gpus AS num_gpus, "
+            "       n.dph AS node_dph "
+            "FROM clips c LEFT JOIN nodes n ON c.node_id = n.instance_id "
+            "ORDER BY CASE c.status "
+            "  WHEN 'assigned' THEN 0 WHEN 'uploaded' THEN 1 "
+            "  WHEN 'pending'  THEN 2 WHEN 'done' THEN 3 ELSE 4 END, c.name"
+        ).fetchall()

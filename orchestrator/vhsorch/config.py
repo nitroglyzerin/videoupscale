@@ -5,11 +5,34 @@ Secrets (VAST_API_KEY, SSH-Key) werden NIE hardcodiert und NIE geloggt.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _bool(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Default-Rechenleistungs-Faktoren pro GPU-Typ (relative Upscale-Durchsatz-
+# Gewichtung). Substring-Match gegen gpu_name. Über GPU_COST_FACTORS
+# überschreibbar, z. B. "RTX 4090=1.0,RTX 5090=1.7".
+_DEFAULT_GPU_FACTORS = {
+    "RTX 5090": 1.7,
+    "RTX 4090": 1.0,
+}
+
+
+def _parse_gpu_factors(raw: str) -> dict[str, float]:
+    factors: dict[str, float] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, _, val = part.partition("=")
+        try:
+            factors[key.strip()] = float(val.strip())
+        except ValueError:
+            continue
+    return factors or dict(_DEFAULT_GPU_FACTORS)
 
 
 @dataclass(frozen=True)
@@ -31,10 +54,23 @@ class Config:
     poll_interval: int
     stable_checks: int
     auto_destroy: bool
+    inflight_per_gpu: int
+    # Kostenmodell (Video-/Kostenübersicht)
+    cost_rate_x: float
+    gpu_cost_factors: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_GPU_FACTORS))
+    gpu_factor_default: float = 1.0
 
     @property
     def db_path(self) -> str:
         return os.path.join(self.state_dir, "vhsorch.sqlite")
+
+    def gpu_factor(self, gpu_name: str | None) -> float:
+        """Kosten-Faktor für einen GPU-Namen (Substring-Match, sonst Default)."""
+        if gpu_name:
+            for key, val in self.gpu_cost_factors.items():
+                if key.lower() in gpu_name.lower():
+                    return val
+        return self.gpu_factor_default
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -57,6 +93,10 @@ class Config:
             poll_interval=int(os.environ.get("POLL_INTERVAL", "30")),
             stable_checks=int(os.environ.get("STABLE_CHECKS", "2")),
             auto_destroy=_bool("AUTO_DESTROY", "1"),
+            inflight_per_gpu=int(os.environ.get("INFLIGHT_PER_GPU", "2")),
+            cost_rate_x=float(os.environ.get("COST_RATE_X", "0.01")),
+            gpu_cost_factors=_parse_gpu_factors(os.environ.get("GPU_COST_FACTORS", "")),
+            gpu_factor_default=float(os.environ.get("GPU_FACTOR_DEFAULT", "1.0")),
         )
 
     def require_api_key(self) -> None:

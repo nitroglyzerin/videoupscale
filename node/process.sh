@@ -150,40 +150,65 @@ process_clip() {
 }
 
 # ============================================================================
-#  Worker: verarbeitet die ihm per round-robin zugeteilten Clips.
-#    $1 = GPU-Index (0..NGPU-1)
+#  Streaming-Zuteilung
+#  ---------------------------------------------------------------------------
+#  Die Worker greifen Clips KONTINUIERLICH ab: sie scannen INPUT_DIR immer
+#  wieder und schnappen sich neu eingetroffene Clips atomar per Claim-Lock
+#  (mkdir ist atomar). So kann die Verarbeitung schon starten, WÄHREND der
+#  Home-Orchestrator noch weitere Clips hochlädt — bei 1200 Videos essenziell.
+#
+#  Vorteil gegenüber starrem Round-Robin: dynamischer Lastausgleich. Eine GPU,
+#  die früher fertig ist, greift sich einfach den nächsten freien Clip.
+#
+#  Wichtig: rsync schreibt in versteckte Temp-Dateien (.name.XXXX) und benennt
+#  erst nach vollständigem Transfer um. `ls` (ohne -a) sieht daher nur FERTIG
+#  übertragene Clips — halb-hochgeladene werden nie angefasst.
 # ============================================================================
+CLAIMS="$WORK_DIR/claims"
+IDLE_SLEEP="${IDLE_SLEEP:-8}"   # Sekunden warten, wenn gerade nichts zu tun ist
+
+# Beim (Neu-)Start alte Claims verwerfen: unterbrochene, nicht fertige Clips
+# (kein final vorhanden) sollen erneut verarbeitet werden -> sauberes Resume.
+rm -rf "$CLAIMS"; mkdir -p "$CLAIMS"
+
 worker() {
   local gpu="$1"
   local logfile="$WORK_DIR/logs/gpu${gpu}.log"
 
-  # Gestaffelter Start gegen gleichzeitige initiale Kompilierung.
+  # Gestaffelter Start gegen gleichzeitige initiale torch.compile-Kompilierung.
   local delay=$(( gpu * STAGGER_SECONDS ))
   log "[GPU $gpu] Worker startet in ${delay}s …"
   sleep "$delay"
 
-  # Deterministische, stabile Reihenfolge über alle Worker hinweg.
-  # WICHTIG: leerzeichen-sicher iterieren (Dateinamen wie "1994-1  T06 V01.mp4").
-  # `for x in $(ls)` würde an Leerzeichen zerbrechen -> read-Schleife nutzen.
-  local idx=0
-  while IFS= read -r base; do
-    [ -n "$base" ] || continue
-    local path="$INPUT_DIR/$base"
-    [ -f "$path" ] || continue
-    # round-robin: Clip idx gehört zu GPU (idx % NGPU).
-    if [ $(( idx % NGPU )) -eq "$gpu" ]; then
-      process_clip "$path" "$gpu" >>"$logfile" 2>&1
-    fi
-    idx=$(( idx + 1 ))
-  done < <(ls -1 "$INPUT_DIR" | sort)
-  log "[GPU $gpu] Worker fertig."
+  # Endlos abgreifen, bis die Node zerstört wird (Orchestrator bei leerer
+  # Queue). Kein Selbst-Exit nötig — die Node wird von außen abgeräumt.
+  while true; do
+    local worked=0
+    # leerzeichen-sicher iterieren (Namen wie "1994-1  T06  V01.mp4").
+    while IFS= read -r base; do
+      [ -n "$base" ] || continue
+      local path="$INPUT_DIR/$base"
+      [ -f "$path" ] || continue
+      local name="${base%.*}"
+      # schon fertig? überspringen (Resume).
+      [ -f "$FINAL_DIR/$name.mp4" ] && continue
+      # atomar claimen; nur der Gewinner verarbeitet diesen Clip.
+      if mkdir "$CLAIMS/$base.lock" 2>/dev/null; then
+        process_clip "$path" "$gpu" >>"$logfile" 2>&1
+        worked=1
+      fi
+    done < <(ls -1 "$INPUT_DIR" 2>/dev/null | sort)
+
+    # Nichts abgegriffen? kurz warten, dann erneut scannen (Streaming-Intake).
+    [ "$worked" -eq 0 ] && sleep "$IDLE_SLEEP"
+  done
 }
 
 # ============================================================================
-#  Main: starte einen Worker pro GPU, warte auf alle.
+#  Main: starte einen Worker pro GPU. Läuft, bis die Node zerstört wird.
 # ============================================================================
-log "Starte $NGPU parallele Worker (Stagger ${STAGGER_SECONDS}s) …"
-log "Input:  $INPUT_DIR"
+log "Starte $NGPU parallele Worker (Stagger ${STAGGER_SECONDS}s, Streaming-Intake) …"
+log "Input:  $INPUT_DIR   (wird laufend nach neuen Clips gescannt)"
 log "Final:  $FINAL_DIR"
 
 pids=()
@@ -192,11 +217,7 @@ for gpu in $(seq 0 $(( NGPU - 1 ))); do
   pids+=("$!")
 done
 
-fail=0
+# Auf die (endlos laufenden) Worker warten.
 for pid in "${pids[@]}"; do
-  wait "$pid" || fail=1
+  wait "$pid"
 done
-
-log "Alle Worker beendet."
-[ "$fail" -eq 0 ] || warn "Mindestens ein Worker meldete einen Fehler — siehe $WORK_DIR/logs/."
-log "Fertige Clips liegen in $FINAL_DIR."

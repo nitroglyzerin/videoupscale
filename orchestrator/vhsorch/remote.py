@@ -76,25 +76,58 @@ class Remote:
             return []
         return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
+    def gpu_activity(self) -> list[tuple[int, str, str]]:
+        """Was gerade auf jeder GPU läuft — aus den Worker-Logs abgeleitet.
+
+        process.sh loggt pro GPU nach /workspace/work/logs/gpu<idx>.log Zeilen
+        wie 'START: <clip>' bzw. 'FERTIG: <clip> -> ...'. Die jeweils letzte
+        dieser Marken bestimmt den Zustand:
+          * letzte Marke START  -> GPU verarbeitet aktuell <clip>  (state 'busy')
+          * letzte Marke FERTIG/SKIP -> GPU ist zwischen Clips     (state 'idle')
+
+        Rückgabe: Liste (gpu_index, state, clip) sortiert nach GPU-Index.
+        """
+        snippet = (
+            'shopt -s nullglob; '
+            'for f in /workspace/work/logs/gpu*.log; do '
+            '  g=$(basename "$f" .log); g=${g#gpu}; '
+            '  line=$(grep -aE "START:|FERTIG:|SKIP" "$f" | tail -1); '
+            '  case "$line" in '
+            '    *START:*)  echo "$g|busy|${line#*START: }" ;; '
+            '    *)         echo "$g|idle|" ;; '
+            '  esac; '
+            'done'
+        )
+        res = self.exec(snippet, timeout=30)
+        if res.returncode != 0:
+            return []
+        out: list[tuple[int, str, str]] = []
+        for line in res.stdout.splitlines():
+            parts = line.split("|", 2)
+            if len(parts) != 3 or not parts[0].isdigit():
+                continue
+            out.append((int(parts[0]), parts[1], parts[2].strip()))
+        return sorted(out, key=lambda t: t[0])
+
     def worker_running(self) -> bool:
         res = self.exec("pgrep -f process.sh >/dev/null 2>&1 && echo yes || echo no", timeout=30)
         return res.stdout.strip() == "yes"
 
     def start_worker(self) -> bool:
-        """Startet process.sh abbruchsicher (überlebt SSH-Trennung).
+        """Startet process.sh detached via setsid (überlebt SSH-Trennung).
 
-        Bevorzugt tmux (für `tmux attach`-Debugging); fällt auf setsid+nohup
-        zurück, falls tmux auf der Node fehlt — so startet der Worker immer und
-        scheitert nie still.
+        Bewusst OHNE tmux — unabhängig von Vasts interaktivem Auto-tmux und
+        immun gegen still fehlschlagende Session-Starts.
+          * idempotent: läuft der Worker schon, passiert nichts (exit 0),
+          * verifiziert: nach dem Start wird 1 s gewartet und per pgrep geprüft,
+            ob der Prozess wirklich lebt -> sonst returncode != 0 (kein stiller
+            Fehlstart mehr).
+        Fortschritt/Fehler landen in /workspace/work/run.log (Monitor tailt es).
         """
         cmd = (
-            "if command -v tmux >/dev/null 2>&1; then "
-            "  tmux has-session -t upscale 2>/dev/null || "
-            "  tmux new-session -d -s upscale "
-            "  '/workspace/process.sh 2>&1 | tee -a /workspace/work/run.log'; "
-            "else "
-            "  setsid bash -c 'nohup /workspace/process.sh "
-            ">> /workspace/work/run.log 2>&1 &' </dev/null; "
-            "fi"
+            "if pgrep -f /workspace/process.sh >/dev/null 2>&1; then exit 0; fi; "
+            "setsid /workspace/process.sh >>/workspace/work/run.log 2>&1 "
+            "</dev/null & "
+            "sleep 1; pgrep -f /workspace/process.sh >/dev/null 2>&1"
         )
         return self.exec(cmd, timeout=60).returncode == 0

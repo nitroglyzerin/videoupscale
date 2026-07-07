@@ -105,23 +105,42 @@ class Scheduler:
             if r is None:
                 continue
 
-            # Noch nicht hochgeladene, zugewiesene Clips pushen.
-            assigned = self.db.clips_for_node(iid, status="assigned")
-            if assigned:
-                paths = [os.path.join(self.cfg.raw_dir, c["name"]) for c in assigned]
-                paths = [p for p in paths if os.path.isfile(p)]
-                if paths and r.push_files(paths):
-                    with self.db.tx():
-                        for c in assigned:
-                            self.db.set_clip_status(c["name"], "uploaded")
-                    log(f"Node {iid}: {len(paths)} Clips hochgeladen.")
-
-            # Worker starten, falls Arbeit da ist und er nicht läuft.
-            has_work = self.db.clips_for_node(iid, status="uploaded")
-            if has_work and not r.worker_running():
+            # Worker FRÜH starten (schon vor Upload-Ende), damit die Node
+            # eintreffende Clips sofort abgreift -> Verarbeitung überlappt mit
+            # dem laufenden Upload. process.sh idlet, bis die ersten Clips da
+            # sind. Idempotent: läuft er schon, passiert nichts.
+            if not r.worker_running():
                 if r.start_worker():
                     self.db.update_node(iid, worker_started=1)
-                    log(f"Node {iid}: Worker (tmux 'upscale') gestartet.")
+                    log(f"Node {iid}: Worker gestartet (process.sh, detached).")
+                else:
+                    log(f"Node {iid}: WARNUNG — Worker-Start fehlgeschlagen, "
+                        f"nächster Takt versucht erneut. Prüfe run.log auf der Node.")
+
+            # HÄPPCHEN = GRAFIKKARTENMENGE (Flow-Control): pro Node nur so viele
+            # Clips "in Arbeit" halten wie GPUs vorhanden (× Puffer). Nachschub
+            # kommt erst, wenn die Node Rückstand abbaut -> minimaler Node-
+            # Speicher, Rohvideos bleiben zuhause, Upload+Verarbeitung überlappen.
+            node_gpus = node["num_gpus"] or 1
+            target = max(1, node_gpus * self.cfg.inflight_per_gpu)
+            backlog = len(self.db.clips_for_node(iid, status="uploaded"))
+            room = target - backlog
+            if room > 0:
+                assigned = self.db.clips_for_node(iid, status="assigned")
+                # Nur Clips, deren Rohdatei tatsächlich (noch) existiert.
+                to_push = [
+                    c for c in assigned[:room]
+                    if os.path.isfile(os.path.join(self.cfg.raw_dir, c["name"]))
+                ]
+                paths = [os.path.join(self.cfg.raw_dir, c["name"]) for c in to_push]
+                if paths and r.push_files(paths):
+                    with self.db.tx():
+                        for c in to_push:
+                            self.db.set_clip_status(c["name"], "uploaded")
+                    still = len(self.db.clips_for_node(iid, status="assigned"))
+                    log(f"Node {iid}: {len(paths)} Clips hochgeladen "
+                        f"(in Arbeit {backlog + len(paths)}/{target}, "
+                        f"{still} warten zuhause).")
 
     def collect(self) -> None:
         """Zieht Ergebnisse und markiert die zugehörigen Clips als done."""
