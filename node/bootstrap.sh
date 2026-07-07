@@ -177,16 +177,23 @@ fetch_model() {
   rm -f "$MODEL_DIR/$name".download "$file".part "$file" 2>/dev/null || true
   for try in 1 2 3; do
     log "Lade Modell vorab (Versuch $try/3): $name …"
-    if curl -fL --retry 3 --retry-delay 5 -o "$file.part" "$url"; then
+    # Wichtig gegen ewiges Hängen: HuggingFace lässt die Verbindung manchmal
+    # offen, schickt aber nichts (0 B/s). Ohne Timeout hängt curl unendlich.
+    #   --speed-limit/--speed-time: bricht ab, wenn > 60 s unter 10 KB/s,
+    #   --connect-timeout: Verbindungsaufbau max. 30 s,
+    #   -C -: bereits geladene Bytes fortsetzen statt 3 GB neu (Resume).
+    if curl -fL -C - --retry 5 --retry-delay 5 \
+         --connect-timeout 30 --speed-limit 10240 --speed-time 60 \
+         -o "$file.part" "$url"; then
       sz="$(stat -c%s "$file.part" 2>/dev/null || echo 0)"
       if [ "$sz" -ge "$min_bytes" ]; then
         mv -f "$file.part" "$file"   # atomar an die Zielstelle
         log "Modell vorab geladen: $file ($(du -h "$file" | cut -f1))"
         return 0
       fi
-      log "Datei zu klein ($sz B, erwartet >= $min_bytes) — verwerfe und versuche erneut."
+      log "Datei zu klein ($sz B, erwartet >= $min_bytes) — verwerfe und lade neu."
+      rm -f "$file.part"   # zu klein = kaputt -> NICHT fortsetzen, frisch holen
     fi
-    rm -f "$file.part"
     sleep 5
   done
   die "Modell-Download fehlgeschlagen ($name). Abbruch, statt jeden Clip an \
