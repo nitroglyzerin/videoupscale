@@ -55,6 +55,12 @@ choose() {
         ;;
       k|K) ((selected--));;
       j|J) ((selected++));;
+      [1-9])                                   # Zifferntaste: 1-basiert wählen
+        if [ "$key" -le "$n" ]; then printf '\033[?25h'; REPLY=$((key - 1)); return; fi
+        ;;
+      0)                                       # 0 = 10. Eintrag
+        if [ "$n" -ge 10 ]; then printf '\033[?25h'; REPLY=9; return; fi
+        ;;
       q|Q) printf '\033[?25h'; REPLY=255; return;;
       '')  printf '\033[?25h'; REPLY=$selected; return;;   # ENTER
     esac
@@ -68,8 +74,34 @@ choose() {
 #  Aktionen
 # ---------------------------------------------------------------------------
 act_status()  { clear; echo -e "${C_TITLE}== Queue & Nodes ==${C_RST}\n"; ORCH status; pause; }
-act_plan()    { clear; echo -e "${C_TITLE}== Offers suchen (bucht nichts) ==${C_RST}\n"; ORCH plan; pause; }
 act_nodes()   { clear; echo -e "${C_TITLE}== Laufende Vast-Instanzen ==${C_RST}\n"; ORCH nodes; pause; }
+
+# Offers suchen UND direkt daraus buchen (Zifferntaste -> Bestätigung -> book).
+act_plan() {
+  clear; echo -e "${C_TITLE}== Offers suchen & buchen ==${C_RST}\n"
+  echo "Suche Offers …"; echo
+  local out; out="$(ORCH plan 2>/dev/null)"
+  echo "$out"
+
+  # Datenzeilen der Tabelle: $1 = laufende Nummer, $2 = OFFER-ID (beide Ganzzahl).
+  local ids=() rows=()
+  mapfile -t ids  < <(echo "$out" | awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {print $2}')
+  mapfile -t rows < <(echo "$out" | awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {$1=""; sub(/^[ \t]+/,""); print}')
+  if [ "${#ids[@]}" -eq 0 ]; then
+    echo -e "\n${C_WARN}Keine buchbaren Offers gefunden.${C_RST}"; pause; return
+  fi
+
+  echo -e "\n${C_TITLE}Offer wählen — Zifferntaste (1/2/3…) oder ↑/↓, ENTER. q = nur ansehen.${C_RST}\n"
+  local labels=() i
+  for i in "${!ids[@]}"; do labels+=("$((i + 1)))  [ID ${ids[$i]}]  ${rows[$i]}"); done
+  choose "${labels[@]}"
+  [ "$REPLY" -eq 255 ] && return
+
+  local oid="${ids[$REPLY]}"
+  echo; read -rp "Offer $oid buchen? [j/N]: " ok
+  [[ "$ok" =~ ^[jJyY]$ ]] || { echo "Abgebrochen."; pause; return; }
+  echo; ORCH book "$oid"; pause
+}
 
 act_book() {
   clear; echo -e "${C_TITLE}== Node buchen ==${C_RST}\n"
@@ -118,8 +150,8 @@ act_ssh() {
 # ---------------------------------------------------------------------------
 LABELS=(
   "Status  — Queue & Nodes anzeigen"
-  "Plan    — Offers suchen (bucht nichts)"
-  "Book    — Node buchen"
+  "Plan    — Offers suchen & direkt buchen"
+  "Book    — Node per ID buchen (manuell)"
   "Nodes   — laufende Vast-Instanzen"
   "Up      — Loop starten (Hintergrund)"
   "Logs    — Loop-Logs live ansehen"
