@@ -126,6 +126,10 @@ class Scheduler:
     def collect(self) -> None:
         """Zieht Ergebnisse und markiert die zugehörigen Clips als done."""
         for node in self.db.active_nodes():
+            # Nur von bereiten Nodes ziehen — sonst rsync-/ssh-Lärm, während
+            # eine frisch gebuchte Node noch bootet (sshd noch nicht oben).
+            if node["status"] != "ready":
+                continue
             r = self._remote(node)
             if r is None:
                 continue
