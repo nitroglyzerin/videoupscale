@@ -75,14 +75,19 @@ class Scheduler:
                         log(f"Node {iid} ist READY (bootstrap abgeschlossen).")
                     else:
                         # sshd ist oben, Bootstrap aber noch nicht fertig. Statt
-                        # auf Vasts onstart zu warten (feuert oft spät), stoßen
-                        # WIR den Bootstrap selbst an — einmalig, idempotent.
-                        if not node["bootstrap_started"]:
-                            if r.start_bootstrap(self.cfg.repo_raw_url):
-                                self.db.update_node(iid, bootstrap_started=1)
-                                log(f"Node {iid}: Bootstrap per SSH angestoßen "
-                                    f"(nicht auf Vast-onstart gewartet).")
-                        # Fortschritt zeigen, statt still auf 'booked' zu verharren.
+                        # auf Vasts onstart zu warten (feuert oft spät — bekam
+                        # hier sogar HTTP 429 von GitHub raw), stoßen WIR den
+                        # Bootstrap selbst an — JEDEN Takt. Das Kommando ist
+                        # node-seitig selbstsichernd (process.sh da -> no-op;
+                        # .bootstrap.launched gesetzt -> no-op), also billig und
+                        # ohne Re-curl. Scheitert der Bootstrap, löscht seine
+                        # ERR-Trap den Marker -> der nächste Takt startet ihn neu
+                        # (selbstheilend, z. B. bei transientem TLS-/Netzfehler).
+                        started = r.start_bootstrap(self.cfg.repo_raw_url)
+                        if started and not node["bootstrap_started"]:
+                            self.db.update_node(iid, bootstrap_started=1)
+                            log(f"Node {iid}: Bootstrap per SSH angestoßen "
+                                f"(nicht auf Vast-onstart gewartet).")
                         st = r.bootstrap_status()
                         log(f"Node {iid}: Bootstrap läuft — "
                             f"{st or 'startet, noch keine Statuszeile …'}")
