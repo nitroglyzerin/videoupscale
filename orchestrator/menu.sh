@@ -150,6 +150,25 @@ act_monitor() {
   done
 }
 
+# Generischer Live-Refresh: ruft 'ORCH <args>' alle iv Sekunden auf und
+# aktualisiert die Anzeige. Beliebige Taste -> zurück.
+live_orch() {
+  local title="$1"; shift
+  local iv=5
+  while true; do
+    clear
+    echo -e "${C_TITLE}== ${title} ==${C_RST}   ${C_DIM}(Refresh ${iv}s · beliebige Taste = zurück)${C_RST}\n"
+    ORCH "$@" 2>/dev/null
+    read -rsn1 -t "$iv" _ && return
+  done
+}
+
+# Workmap: welche GPU/Node arbeitet gerade an welchem Video (aktiv pullend).
+act_workmap() { live_orch "Workmap — GPU ▶ Video (live)" workmap; }
+
+# Video-Tab: Liste mit Zustand + Gesamtkosten oben + Kosten pro Video (live).
+act_videos()  { live_orch "Videos & Kosten (live)" videos; }
+
 # Offers suchen UND direkt daraus buchen (Zifferntaste -> Bestätigung -> book).
 act_plan() {
   clear; echo -e "${C_TITLE}== Offers suchen & buchen ==${C_RST}\n"
@@ -223,6 +242,8 @@ act_ssh() {
 #  Hauptschleife
 # ---------------------------------------------------------------------------
 LABELS=(
+  "Workmap — LIVE: welche GPU ▶ welches Video (auto-refresh)"
+  "Videos  — LIVE: Liste + Gesamtkosten + Kosten/Video (auto-refresh)"
   "Status  — Queue & Nodes (Momentaufnahme)"
   "Monitor — LIVE: Nodes, GPUs, Fortschritt (auto-refresh)"
   "Plan    — Offers suchen & direkt buchen"
@@ -244,16 +265,18 @@ while true; do
   echo -e "${C_DIM}   ↑/↓ bewegen · ENTER wählen · q beenden${C_RST}\n"
   choose "${LABELS[@]}"
   case "$REPLY" in
-    0) act_status;;
-    1) act_monitor;;
-    2) act_plan;;
-    3) act_book;;
-    4) act_nodes;;
-    5) act_up;;
-    6) act_logs;;
-    7) act_down;;
-    8) act_destroy;;
-    9) act_ssh;;
-    10|255) clear; echo "Tschüss."; exit 0;;
+    0) act_workmap;;
+    1) act_videos;;
+    2) act_status;;
+    3) act_monitor;;
+    4) act_plan;;
+    5) act_book;;
+    6) act_nodes;;
+    7) act_up;;
+    8) act_logs;;
+    9) act_down;;
+    10) act_destroy;;
+    11) act_ssh;;
+    12|255) clear; echo "Tschüss."; exit 0;;
   esac
 done

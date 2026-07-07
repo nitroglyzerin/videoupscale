@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import report
 from .config import Config
 from .db import DB
 from .scheduler import Scheduler
@@ -111,6 +112,23 @@ def cmd_nodes(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_workmap(cfg: Config, args) -> int:
+    """Zeigt, welche GPU welcher Node gerade an welchem Video arbeitet."""
+    cfg.require_api_key()
+    vast = VastClient(cfg.vast_api_key)
+    db = DB(cfg.db_path)
+    print(report.render_workmap(cfg, db, vast))
+    return 0
+
+
+def cmd_videos(cfg: Config, args) -> int:
+    """Video-Liste mit Zustand + Kostenschätzung (gesamt und pro Video)."""
+    db = DB(cfg.db_path)
+    limit = None if getattr(args, "all", False) else args.limit
+    print(report.render_videos(cfg, db, limit=limit))
+    return 0
+
+
 def cmd_destroy(cfg: Config, args) -> int:
     cfg.require_api_key()
     vast = VastClient(cfg.vast_api_key)
@@ -149,6 +167,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("nodes", help="laufende Vast-Instanzen abfragen")
     sp.set_defaults(func=cmd_nodes)
+
+    sp = sub.add_parser("workmap", help="welche GPU/Node arbeitet an welchem Video (live)")
+    sp.set_defaults(func=cmd_workmap)
+
+    sp = sub.add_parser("videos", help="Video-Liste mit Zustand + Kosten pro Video")
+    sp.add_argument("--limit", type=int, default=40,
+                    help="max. Zeilen (Default 40)")
+    sp.add_argument("--all", action="store_true", help="alle Clips zeigen")
+    sp.set_defaults(func=cmd_videos)
 
     sp = sub.add_parser("destroy", help="Instanz(en) zerstören: <id> oder 'all'")
     sp.add_argument("target")
