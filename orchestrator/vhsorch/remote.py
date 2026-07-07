@@ -17,14 +17,17 @@ from typing import Optional
 _PGREP_WORKER = r"pgrep -f '[p]rocess\.sh'"
 
 
-def _ssh_base(key_path: str, port: int) -> list[str]:
+def _ssh_base(key_path: str, port: int, connect_timeout: int = 20) -> list[str]:
     return [
         "ssh", "-p", str(port),
         "-i", key_path,
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "UserKnownHostsFile=/state/known_hosts",
-        "-o", "ConnectTimeout=20",
+        "-o", f"ConnectTimeout={connect_timeout}",
         "-o", "ServerAliveInterval=15",
+        # BatchMode: nie interaktiv nach Passwort fragen -> hängt nie am Prompt,
+        # scheitert stattdessen sofort (wichtig für die Live-Anzeige).
+        "-o", "BatchMode=yes",
     ]
 
 
@@ -49,9 +52,15 @@ class Remote:
         cmd = _ssh_base(self.key_path, self.port) + [self.target, "true"]
         return subprocess.run(cmd, capture_output=True, timeout=30).returncode == 0
 
-    def exec(self, command: str, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
-        cmd = _ssh_base(self.key_path, self.port) + [self.target, command]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    def exec(self, command: str, timeout: Optional[int] = None,
+             connect_timeout: int = 20) -> subprocess.CompletedProcess:
+        cmd = _ssh_base(self.key_path, self.port, connect_timeout) + [self.target, command]
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Harte Obergrenze überschritten (Node hängt): als sauberer
+            # Fehlschlag zurückgeben, statt die Live-Anzeige zu blockieren.
+            return subprocess.CompletedProcess(cmd, returncode=124, stdout="", stderr="")
 
     def push_files(self, local_paths: list[str], remote_dir: str = "/workspace/input/") -> bool:
         """Pusht eine Liste konkreter Dateien in remote_dir (delta, resumierbar)."""
@@ -78,7 +87,8 @@ class Remote:
     def list_remote_final(self, remote_dir: str = "/workspace/final") -> list[str]:
         """Listet die .mp4-Dateinamen im final-Ordner der Node."""
         res = self.exec(
-            f"ls -1 {remote_dir} 2>/dev/null | grep -i '\\.mp4$' || true", timeout=30
+            f"ls -1 {remote_dir} 2>/dev/null | grep -i '\\.mp4$' || true",
+            timeout=15, connect_timeout=8,
         )
         if res.returncode != 0:
             return []
@@ -91,7 +101,7 @@ class Remote:
         Node "booked" ist (process.sh noch nicht da), zeigt der Orchestrator
         diesen Text an -> sichtbarer Fortschritt statt blindes "booked".
         """
-        res = self.exec(f"cat {path} 2>/dev/null || true", timeout=20)
+        res = self.exec(f"cat {path} 2>/dev/null || true", timeout=12, connect_timeout=8)
         return res.stdout.strip() if res.returncode == 0 else ""
 
     def gpu_activity(self) -> list[tuple[int, str, str, str, str]]:
@@ -134,7 +144,7 @@ class Remote:
           fi
         done
         '''
-        res = self.exec(snippet, timeout=30)
+        res = self.exec(snippet, timeout=15, connect_timeout=8)
         if res.returncode != 0:
             return []
         out: list[tuple[int, str, str, str, str]] = []
@@ -154,7 +164,7 @@ class Remote:
         res = self.exec(
             "nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total "
             "--format=csv,noheader,nounits",
-            timeout=30,
+            timeout=15, connect_timeout=8,
         )
         if res.returncode != 0:
             return {}
