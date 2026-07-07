@@ -39,6 +39,12 @@ log()  { echo -e "\033[1;36m[process]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[process WARN]\033[0m $*" >&2; }
 die()  { echo -e "\033[1;31m[process FEHLER]\033[0m $*" >&2; exit 1; }
 
+# In das SeedVR2-Verzeichnis wechseln: inference_cli.py sucht/erwartet das
+# Modell unter ./models/SEEDVR2 (CWD-relativ). Ein festes CWD stellt sicher,
+# dass es das in bootstrap.sh VORAB geladene Modell findet — kein Laufzeit-
+# Download, kein Wettlauf mehrerer Worker um dieselbe .download-Datei.
+cd "$SEEDVR2_DIR" || die "SEEDVR2_DIR ($SEEDVR2_DIR) nicht gefunden — Bootstrap gelaufen?"
+
 # ============================================================================
 #  FP8-Guard: fp8_e4m3 kompiliert nur auf Ada (8.9) / Blackwell (>=9.0).
 #  Auf Ampere (A100=8.0, 3090=8.6) NICHT -> sauber abbrechen.
