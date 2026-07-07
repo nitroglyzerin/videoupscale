@@ -1,0 +1,23 @@
+# Secrets — NIEMALS committen
+.env
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+
+# State / Laufzeit
+state/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store

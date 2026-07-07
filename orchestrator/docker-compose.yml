@@ -1,0 +1,40 @@
+# ============================================================================
+#  Home-Orchestrator — läuft im Docker-LXC auf Proxmox VE 9.2
+#
+#  SICHERHEITSHINWEISE (bitte lesen):
+#
+#  1) rw-Mount der WD Red:
+#     Wir mounten NUR das dedizierte Batch-Unterverzeichnis
+#     /mnt/hassos/vhs-batch/ — NICHT die ganze Platte und NICHT die
+#     Jellyfin-Medienstruktur. Der Container kann so ausschließlich innerhalb
+#     dieses Ordners schreiben. Passe den linken Pfad an dein reales Mount an.
+#     Lege darunter `raw/` (Input) und `done/` (Output) an.
+#
+#  2) API-Key & SSH-Key:
+#     - VAST_API_KEY kommt aus der .env-Datei (NICHT eingecheckt).
+#     - Der SSH-Private-Key wird read-only (:ro) als Secret-Verzeichnis
+#       gemountet. Er verlässt den Host nie und steht nur diesem Container
+#       zur Verfügung. Rechte am Key: chmod 600.
+# ============================================================================
+services:
+  orchestrator:
+    build: .
+    image: vhsorch:latest
+    container_name: vhsorch
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Container-interne Pfade (Mapping siehe volumes).
+      RAW_DIR: /data/raw
+      DONE_DIR: /data/done
+      STATE_DIR: /state
+      SSH_KEY_PATH: /secrets/id_ed25519
+    volumes:
+      # --- Daten: STRIKT nur das Batch-Unterverzeichnis der WD Red (rw) ------
+      - /mnt/hassos/vhs-batch/raw:/data/raw:rw
+      - /mnt/hassos/vhs-batch/done:/data/done:rw
+      # --- State (SQLite-Queue, known_hosts): persistent, klein --------------
+      - ./state:/state:rw
+      # --- Secrets: SSH-Private-Key, read-only -------------------------------
+      - ./secrets:/secrets:ro

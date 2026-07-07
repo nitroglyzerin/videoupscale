@@ -1,0 +1,52 @@
+"""Ingest: Watch-Ordner /data/raw sicher gegen halb-hochgeladene Dateien.
+
+Ein Clip wird erst in die Queue aufgenommen, wenn seine Größe über
+STABLE_CHECKS aufeinanderfolgende Polls stabil bleibt (kein wachsendes File
+mehr). Alternativ: der Nutzer legt Dateien fertig per `mv` aus einem Staging-
+Verzeichnis ab — dann ist die Größe sofort stabil.
+"""
+from __future__ import annotations
+
+import os
+from typing import Dict
+
+from .db import DB
+
+VIDEO_EXT = {".mp4", ".mkv", ".avi", ".mov", ".m2ts", ".ts", ".mpg", ".mpeg", ".webm"}
+
+
+class Ingest:
+    def __init__(self, db: DB, raw_dir: str, stable_checks: int):
+        self.db = db
+        self.raw_dir = raw_dir
+        self.stable_checks = max(1, stable_checks)
+        # name -> (letzte_größe, wie_oft_gleich)
+        self._seen: Dict[str, tuple[int, int]] = {}
+
+    def scan(self) -> int:
+        """Nimmt neu-stabile Clips in die Queue auf. Gibt Anzahl neuer Clips."""
+        if not os.path.isdir(self.raw_dir):
+            return 0
+        added = 0
+        for entry in os.scandir(self.raw_dir):
+            if not entry.is_file():
+                continue
+            if os.path.splitext(entry.name)[1].lower() not in VIDEO_EXT:
+                continue
+            if self.db.has_clip(entry.name):
+                continue
+
+            size = entry.stat().st_size
+            last_size, stable = self._seen.get(entry.name, (-1, 0))
+            if size == last_size and size > 0:
+                stable += 1
+            else:
+                stable = 0
+            self._seen[entry.name] = (size, stable)
+
+            # +1, weil der erste "gleich"-Vergleich erst beim zweiten Poll zählt.
+            if stable + 1 >= self.stable_checks:
+                if self.db.add_clip(entry.name, size):
+                    added += 1
+                    self._seen.pop(entry.name, None)
+        return added
