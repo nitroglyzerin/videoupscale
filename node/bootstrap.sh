@@ -55,7 +55,10 @@ if ! flock -n 9; then
   exit 0
 fi
 
-trap 'status "FEHLER in Zeile $LINENO — Bootstrap abgebrochen (siehe onstart-Log)"' ERR
+# Bei Abbruch: Fehler mit Zeilennummer festhalten UND den Start-Marker löschen,
+# damit der Orchestrator (start_bootstrap) den Bootstrap im nächsten Takt neu
+# anstößt -> selbstheilend statt dauerhaft "booked".
+trap 'rm -f /workspace/.bootstrap.launched; status "FEHLER in Zeile $LINENO — Bootstrap abgebrochen (siehe onstart-Log)"' ERR
 
 status "0/7 Bootstrap gestartet"
 log "Starte Node-Bootstrap …"
@@ -84,7 +87,16 @@ log "Verzeichnisse angelegt: input work final tmp"
 status "2/7 SeedVR2 klonen"
 if [ ! -d "$SEEDVR2_DIR/.git" ]; then
   log "Klone SeedVR2 nach $SEEDVR2_DIR …"
-  git clone --depth 1 "$SEEDVR2_REPO" "$SEEDVR2_DIR"
+  # Reste eines abgebrochenen Klons entfernen, sonst scheitert git clone an
+  # "destination path already exists and is not an empty directory".
+  rm -rf "$SEEDVR2_DIR"
+  cloned=0
+  for try in 1 2 3; do
+    if git clone --depth 1 "$SEEDVR2_REPO" "$SEEDVR2_DIR"; then cloned=1; break; fi
+    log "git clone Versuch $try/3 fehlgeschlagen — verwerfe und versuche erneut …"
+    rm -rf "$SEEDVR2_DIR"; sleep 5
+  done
+  [ "$cloned" -eq 1 ] || die "SeedVR2-Clone nach 3 Versuchen fehlgeschlagen ($SEEDVR2_REPO)."
 else
   log "SeedVR2 bereits vorhanden — git pull …"
   git -C "$SEEDVR2_DIR" pull --ff-only || true
