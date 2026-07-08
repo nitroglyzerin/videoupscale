@@ -35,6 +35,16 @@ STAGGER_SECONDS="${STAGGER_SECONDS:-30}"
 
 mkdir -p "$WORK_DIR" "$FINAL_DIR" "$TMP_DIR" "$WORK_DIR/logs"
 
+# Single-Instance-Guard: ein zweiter process.sh-Start (z. B. ein versehentlicher
+# zweiter Worker-Nudge, während der erste noch läuft) darf KEINEN zweiten
+# Worker-Baum aufbauen — sonst laufen 2 SeedVR2-Inferenzen pro physischer GPU
+# -> VRAM/cgroup-OOM. flock hält genau EINE Instanz; ein zweiter Start beendet
+# sich sofort sauber (exit 0). Fällt flock, läuft es wie bisher (best effort).
+exec 200>/workspace/.process.lock
+if command -v flock >/dev/null 2>&1; then
+  flock -n 200 || { echo "[process] läuft bereits (flock) — zweiter Start beendet sich."; exit 0; }
+fi
+
 log()  { echo -e "\033[1;36m[process]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[process WARN]\033[0m $*" >&2; }
 die()  { echo -e "\033[1;31m[process FEHLER]\033[0m $*" >&2; exit 1; }

@@ -68,6 +68,8 @@ class Config:
     stable_checks: int
     auto_destroy: bool
     inflight_per_gpu: int
+    probe_interval: int   # Sekunden zwischen (read-only) SSH-Probes der Nodes
+    heavy_workers: int    # parallele Slots für lange Transfers (push_models/push/pull)
     # Kostenmodell (Video-/Kostenübersicht)
     cost_rate_x: float
     gpu_cost_factors: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_GPU_FACTORS))
@@ -76,6 +78,16 @@ class Config:
     @property
     def db_path(self) -> str:
         return os.path.join(self.state_dir, "vhsorch.sqlite")
+
+    @property
+    def snapshot_path(self) -> str:
+        """Vom Scheduler-Tick geschriebener Live-Status (JSON), von der TUI gelesen."""
+        return os.path.join(self.state_dir, "snapshot.json")
+
+    @property
+    def ssh_mux_dir(self) -> str:
+        """Verzeichnis für SSH-ControlPersist-Sockets (warmer Handshake)."""
+        return os.path.join(self.state_dir, "ssh-mux")
 
     def gpu_factor(self, gpu_name: str | None) -> float:
         """Kosten-Faktor für einen GPU-Namen (Substring-Match, sonst Default)."""
@@ -110,6 +122,8 @@ class Config:
             stable_checks=int(os.environ.get("STABLE_CHECKS", "2")),
             auto_destroy=_bool("AUTO_DESTROY", "1"),
             inflight_per_gpu=int(os.environ.get("INFLIGHT_PER_GPU", "2")),
+            probe_interval=int(os.environ.get("PROBE_INTERVAL", "5")),
+            heavy_workers=int(os.environ.get("HEAVY_WORKERS", "4")),
             cost_rate_x=float(os.environ.get("COST_RATE_X", "0.01")),
             gpu_cost_factors=_parse_gpu_factors(os.environ.get("GPU_COST_FACTORS", "")),
             gpu_factor_default=float(os.environ.get("GPU_FACTOR_DEFAULT", "1.0")),

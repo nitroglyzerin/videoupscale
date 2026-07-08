@@ -49,21 +49,17 @@ def cmd_plan(cfg: Config, args) -> int:
     return 0
 
 
-def cmd_book(cfg: Config, args) -> int:
-    cfg.require_api_key()
-    vast = VastClient(cfg.vast_api_key)
-    db = DB(cfg.db_path)
+def book_offer(cfg: Config, vast: VastClient, db: DB, offer_id: int):
+    """Bucht GENAU dieses Offer und legt die Node als 'booked' an.
 
-    # Offer vor der Buchung erneut verifizieren (Preis/Verfügbarkeit).
+    Wiederverwendbar von der CLI (`book`) UND der TUI (Node-dazu-Overlay).
+    Rückgabe: (instance_id, Offer). Wirft ValueError, wenn das Offer weg ist.
+    """
     offers = {o.id: o for o in vast.search_offers(disk_gb=cfg.vast_disk_gb, min_gpus=1)}
-    offer = offers.get(args.offer_id)
+    offer = offers.get(offer_id)
     if offer is None:
-        print(f"Offer {args.offer_id} nicht (mehr) verfügbar oder außerhalb der Filter. "
-              "Führe erneut `plan` aus.")
-        return 1
-
-    print(f"Buche Offer {offer.id}: {offer.gpu_name} x{offer.num_gpus} @ "
-          f"{offer.dph_total:.3f} $/h ({offer.geolocation}) …")
+        raise ValueError(
+            f"Offer {offer_id} nicht (mehr) verfügbar oder außerhalb der Filter.")
     onstart = _bootstrap_onstart(cfg)
     instance_id = vast.create_instance(
         offer_id=offer.id, image=cfg.vast_image, disk_gb=cfg.vast_disk_gb,
@@ -73,9 +69,28 @@ def cmd_book(cfg: Config, args) -> int:
         instance_id=instance_id, offer_id=offer.id, gpu_name=offer.gpu_name,
         num_gpus=offer.num_gpus, dph=offer.dph_total, status="booked",
     )
-    print(f"Gebucht. Instanz-ID {instance_id}. Bootstrap läuft per onstart.")
-    print("Starte danach den Loop mit:  vhsorch run")
+    return instance_id, offer
+
+
+def cmd_book(cfg: Config, args) -> int:
+    cfg.require_api_key()
+    vast = VastClient(cfg.vast_api_key)
+    db = DB(cfg.db_path)
+    try:
+        instance_id, offer = book_offer(cfg, vast, db, args.offer_id)
+    except ValueError as e:
+        print(f"{e} Führe erneut `plan` aus.")
+        return 1
+    print(f"Gebucht: Offer {offer.id} ({offer.gpu_name} x{offer.num_gpus} @ "
+          f"{offer.dph_total:.3f} $/h, {offer.geolocation}). Instanz-ID {instance_id}.")
+    print("Bootstrap läuft per onstart. Starte den Loop mit:  vhsorch run")
     return 0
+
+
+def cmd_tui(cfg: Config, args) -> int:
+    """Startet die interaktive Textual-Steuerung (reiner Leser des Snapshots)."""
+    from .tui import run_tui   # lazy: textual nur nötig, wenn man die TUI startet
+    return run_tui(cfg)
 
 
 def cmd_run(cfg: Config, args) -> int:
@@ -217,6 +232,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("run", help="Scheduler-Loop starten (push/pull/auto-destroy)")
     sp.set_defaults(func=cmd_run)
+
+    sp = sub.add_parser("tui", help="interaktive Steuerung (Textual, liest Snapshot)")
+    sp.set_defaults(func=cmd_tui)
 
     sp = sub.add_parser("status", help="lokalen Queue-/Node-Status zeigen")
     sp.set_defaults(func=cmd_status)

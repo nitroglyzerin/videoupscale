@@ -22,11 +22,18 @@ class Ingest:
         self.stable_checks = max(1, stable_checks)
         # name -> (letzte_größe, wie_oft_gleich)
         self._seen: Dict[str, tuple[int, int]] = {}
+        # Dateien, für die wir schon eine Stamm-Kollision gemeldet haben (nur 1x).
+        self._warned_collisions: set[str] = set()
 
     def scan(self) -> int:
         """Nimmt neu-stabile Clips in die Queue auf. Gibt Anzahl neuer Clips."""
         if not os.path.isdir(self.raw_dir):
             return 0
+        # Bekannte Stämme (Dateiname ohne Endung): das Node-Ergebnis heißt
+        # <stamm>.mp4, also würden zwei Rohclips mit gleichem Stamm (z. B.
+        # tape.avi + tape.mp4) auf DIESELBE Ergebnisdatei zeigen -> stiller
+        # Datenverlust. Zweiten gleich-stämmigen Clip ablehnen.
+        existing_stems = {os.path.splitext(n)[0] for n in self.db.all_clip_names()}
         added = 0
         for entry in os.scandir(self.raw_dir):
             if not entry.is_file():
@@ -34,6 +41,14 @@ class Ingest:
             if os.path.splitext(entry.name)[1].lower() not in VIDEO_EXT:
                 continue
             if self.db.has_clip(entry.name):
+                continue
+            stem = os.path.splitext(entry.name)[0]
+            if stem in existing_stems:
+                if entry.name not in self._warned_collisions:
+                    print(f"[ingest] WARNUNG: '{entry.name}' hat denselben Stamm wie ein "
+                          f"bereits eingereihter Clip -> abgelehnt (gleicher Final-Name).",
+                          flush=True)
+                    self._warned_collisions.add(entry.name)
                 continue
 
             size = entry.stat().st_size
@@ -48,5 +63,6 @@ class Ingest:
             if stable + 1 >= self.stable_checks:
                 if self.db.add_clip(entry.name, size):
                     added += 1
+                    existing_stems.add(stem)   # sperrt Kollisionen im selben Scan
                     self._seen.pop(entry.name, None)
         return added

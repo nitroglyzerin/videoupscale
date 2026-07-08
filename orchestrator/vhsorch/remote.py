@@ -17,8 +17,9 @@ from typing import Optional
 _PGREP_WORKER = r"pgrep -f '[p]rocess\.sh'"
 
 
-def _ssh_base(key_path: str, port: int, connect_timeout: int = 20) -> list[str]:
-    return [
+def _ssh_base(key_path: str, port: int, connect_timeout: int = 20,
+              control_dir: Optional[str] = None) -> list[str]:
+    base = [
         "ssh", "-p", str(port),
         "-i", key_path,
         # KEINE Host-Key-Prüfung: Vast recycelt Hostnamen (ssh9.vast.ai etc.)
@@ -38,32 +39,48 @@ def _ssh_base(key_path: str, port: int, connect_timeout: int = 20) -> list[str]:
         # scheitert stattdessen sofort (wichtig für die Live-Anzeige).
         "-o", "BatchMode=yes",
     ]
+    # ControlMaster/ControlPersist: die ERSTE Verbindung öffnet einen Master-
+    # Socket, jede weitere (Probe, Nudge, rsync) multiplext darüber -> spart den
+    # teuren TLS/Handshake pro Aufruf (~0.5-2 s) und macht die häufigen Probes
+    # quasi-instant. control_dir muss existieren + schreibbar sein (state-Volume).
+    if control_dir:
+        base += [
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPersist=60s",
+            "-o", f"ControlPath={control_dir}/cm-%h-%p",
+        ]
+    return base
 
 
 class Remote:
     """Eine SSH-erreichbare Vast-Node."""
 
-    def __init__(self, host: str, port: int, key_path: str, user: str = "root"):
+    def __init__(self, host: str, port: int, key_path: str, user: str = "root",
+                 control_dir: Optional[str] = None):
         self.host = host
         self.port = port
         self.key_path = key_path
         self.user = user
+        # Verzeichnis für den ControlPersist-Master-Socket (None -> kein Muxing).
+        self.control_dir = control_dir
 
     @property
     def target(self) -> str:
         return f"{self.user}@{self.host}"
 
     def _rsync_e(self) -> str:
-        base = _ssh_base(self.key_path, self.port)
+        base = _ssh_base(self.key_path, self.port, control_dir=self.control_dir)
         return " ".join(base)
 
     def reachable(self) -> bool:
-        cmd = _ssh_base(self.key_path, self.port) + [self.target, "true"]
+        cmd = _ssh_base(self.key_path, self.port,
+                        control_dir=self.control_dir) + [self.target, "true"]
         return subprocess.run(cmd, capture_output=True, timeout=30).returncode == 0
 
     def exec(self, command: str, timeout: Optional[int] = None,
              connect_timeout: int = 20) -> subprocess.CompletedProcess:
-        cmd = _ssh_base(self.key_path, self.port, connect_timeout) + [self.target, command]
+        cmd = _ssh_base(self.key_path, self.port, connect_timeout,
+                        self.control_dir) + [self.target, command]
         try:
             return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -255,10 +272,121 @@ class Remote:
                 continue
         return out
 
+    # Ein einziges Remote-Snippet, das ALLES für den Snapshot in EINEM SSH-Aufruf
+    # liefert (statt 4-5 sequentieller Calls je 8-20 s ConnectTimeout). Abschnitte
+    # sind mit @MARKERN getrennt und werden in probe() geparst.
+    _PROBE_SNIPPET = r'''
+      if [ -x /workspace/process.sh ]; then echo "PROC=1"; else echo "PROC=0"; fi
+      if pgrep -f '[p]rocess\.sh' >/dev/null 2>&1; then echo "WORKER=1"; else echo "WORKER=0"; fi
+      echo "BOOTSTRAP=$(cat /workspace/bootstrap.status 2>/dev/null | tail -n1)"
+      echo "@GPUACT"
+      shopt -s nullglob
+      for lf in /workspace/work/logs/gpu*.log; do
+        g=$(basename "$lf" .log); g=${g#gpu}
+        info=$(awk '
+          /START: /  { busy=1; c=$0; sub(/.*START: /,"",c); clip=c; ph="" }
+          /PHASE /   { p=$0; sub(/.*PHASE /,"",p); sub(/:.*/,"",p); ph=p }
+          /FERTIG:/  { busy=0 }
+          /FAIL:/    { busy=0 }
+          /SKIP/     { busy=0 }
+          END { printf "%d|%s|%s", busy+0, ph, clip }
+        ' "$lf")
+        IFS="|" read -r busy ph clip <<<"$info"
+        if [ "$busy" = "1" ] && [ -n "$clip" ]; then
+          pct=$(tail -n 80 "$lf" | grep -oaE "[0-9]+%" | tail -1)
+          echo "$g|busy|$ph|$pct|$clip"
+        else
+          echo "$g|idle|||"
+        fi
+      done
+      echo "@GPUSTATS"
+      nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total \
+                 --format=csv,noheader,nounits 2>/dev/null || true
+      echo "@FINAL"
+      ls -1 /workspace/final 2>/dev/null | grep -i '\.mp4$' || true
+      echo "@FAILS"
+      awk '
+        /START: /  { c=$0; sub(/.*START: /,"",c);  last[c]="start" }
+        /FERTIG: / { c=$0; sub(/.*FERTIG: /,"",c); last[c]="ok" }
+        /SKIP /    { c=$0; sub(/.*SKIP[^:]*: /,"",c); last[c]="ok" }
+        /FAIL: /   { c=$0; sub(/.*FAIL: /,"",c);   last[c]="fail" }
+        END { for (k in last) if (last[k]=="fail") print k }
+      ' /workspace/work/logs/gpu*.log 2>/dev/null | sort -u || true
+      echo "@END"
+    '''
+
+    def probe(self, timeout: int = 20, connect_timeout: int = 10) -> dict:
+        """Ein-Aufruf-Schnappschuss der Node für den Scheduler-Snapshot.
+
+        Rückgabe (JSON-freundlich):
+          reachable, process_present (=ready), worker_running, bootstrap_status,
+          gpus_activity: [(idx, state, clip, phase, pct)],
+          gpu_stats: {idx: (util, used_mib, total_mib)},
+          final: [<name>.mp4, …]  (auf Node fertig),
+          fails: [<clip-basisname>, …]  (mind. einmal FAIL geloggt).
+        Bei SSH-Fehler/Timeout: reachable=False, Rest leer — nie Exception.
+        """
+        empty = {
+            "reachable": False, "process_present": False, "worker_running": False,
+            "bootstrap_status": "", "gpus_activity": [], "gpu_stats": {},
+            "final": [], "fails": [],
+        }
+        res = self.exec(self._PROBE_SNIPPET, timeout=timeout, connect_timeout=connect_timeout)
+        if res.returncode != 0:
+            return empty
+
+        out = dict(empty)
+        out["reachable"] = True
+        section = "head"
+        for raw in res.stdout.splitlines():
+            line = raw.rstrip("\n")
+            if line in ("@GPUACT", "@GPUSTATS", "@FINAL", "@FAILS", "@END"):
+                section = line
+                continue
+            if section == "head":
+                if line.startswith("PROC="):
+                    out["process_present"] = line[5:].strip() == "1"
+                elif line.startswith("WORKER="):
+                    out["worker_running"] = line[7:].strip() == "1"
+                elif line.startswith("BOOTSTRAP="):
+                    out["bootstrap_status"] = line[10:].strip()
+            elif section == "@GPUACT":
+                parts = line.split("|", 4)
+                if len(parts) == 5 and parts[0].isdigit():
+                    gpu, state, phase, pct, clip = parts
+                    out["gpus_activity"].append(
+                        (int(gpu), state, clip.strip(), phase.strip(), pct.strip()))
+            elif section == "@GPUSTATS":
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) == 4 and parts[0].isdigit():
+                    try:
+                        out["gpu_stats"][int(parts[0])] = (
+                            int(parts[1]), int(parts[2]), int(parts[3]))
+                    except ValueError:
+                        pass
+            elif section == "@FINAL":
+                if line.strip():
+                    out["final"].append(line.strip())
+            elif section == "@FAILS":
+                if line.strip():
+                    out["fails"].append(line.strip())
+        out["gpus_activity"].sort(key=lambda t: t[0])
+        return out
+
     def worker_running(self) -> bool:
         res = self.exec(f"{_PGREP_WORKER} >/dev/null 2>&1 && echo yes || echo no",
                         timeout=30)
         return res.stdout.strip() == "yes"
+
+    def release_claim(self, clip_name: str,
+                      claims_dir: str = "/workspace/work/claims") -> None:
+        """Gibt den Claim-Lock eines Clips frei (best effort), damit ihn ein Worker
+        NEU greifen kann. Nötig beim Retry: process.sh entfernt einen Lock sonst
+        erst beim Neustart -> ein einmal fehlgeschlagener Clip würde auf derselben
+        Node nie wieder angefasst. Der Lock-Name ist '<voller Dateiname>.lock'."""
+        safe = clip_name.replace("'", "'\\''")
+        self.exec(f"rmdir '{claims_dir}/{safe}.lock' 2>/dev/null || true",
+                  timeout=15, connect_timeout=8)
 
     def start_worker(self) -> bool:
         """Startet process.sh detached via setsid (überlebt SSH-Trennung).
@@ -271,9 +399,14 @@ class Remote:
             Fehlstart mehr).
         Fortschritt/Fehler landen in /workspace/work/run.log (Monitor tailt es).
         """
-        # Detached starten (eigenes ssh-Kommando OHNE pgrep -> kein Selbsttreffer).
-        launch = ("setsid /workspace/process.sh "
-                  ">>/workspace/work/run.log 2>&1 </dev/null &")
+        # IDEMPOTENT: nur starten, wenn NICHT bereits ein process.sh läuft. Ohne
+        # diese Wache würde ein zweiter Aufruf (manueller [w]-Nudge, während der
+        # Worker noch läuft) einen ZWEITEN Worker-Baum aufbauen -> 2 SeedVR2-
+        # Inferenzen pro physischer GPU -> VRAM/cgroup-OOM. Der Bracket-Trick
+        # ([p]rocess) verhindert, dass pgrep sich selbst findet.
+        launch = (f"{_PGREP_WORKER} >/dev/null 2>&1 || "
+                  "{ setsid /workspace/process.sh "
+                  ">>/workspace/work/run.log 2>&1 </dev/null & }")
         self.exec(launch, timeout=30)
         # Sauber verifizieren: separater pgrep-Aufruf mit Bracket-Trick, dessen
         # eigene Kommandozeile den echten Prozess NICHT vortäuscht.

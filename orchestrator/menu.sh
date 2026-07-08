@@ -232,6 +232,12 @@ act_plan() {
   echo; ORCH book "$oid"; pause
 }
 
+# Neue Textual-TUI starten (reiner Leser des Scheduler-Snapshots, immer flüssig).
+# 'docker compose run --rm' allokiert ein TTY (im Gegensatz zu ORCH_BG mit -T),
+# die interaktive TUI braucht das. Der Scheduler muss laufen (Menüpunkt 'Up'),
+# sonst zeigt die TUI 'Warte auf Snapshot …'.
+act_tui()  { clear; $DC run --rm orchestrator tui; }
+
 act_up()   { clear; echo -e "${C_TITLE}== Loop starten (Hintergrund) ==${C_RST}\n"; $DC up -d && echo -e "\n${C_OK}Loop läuft.${C_RST} Logs im Menüpunkt 'Loop-Logs'."; pause; }
 act_logs() { clear; echo -e "${C_TITLE}== Loop-Logs (Strg-C = zurück) ==${C_RST}\n"; trap ' ' INT; $DC logs -f --tail=50; trap - INT; pause; }
 act_down() { clear; echo -e "${C_WARN}== Loop stoppen ==${C_RST}\n"; $DC down && echo -e "\n${C_OK}Loop gestoppt.${C_RST} (Vast-Node läuft weiter — separat 'destroy'!)"; pause; }
@@ -302,6 +308,7 @@ act_setup_logs() {
 #  Hauptschleife
 # ---------------------------------------------------------------------------
 LABELS=(
+  "TUI     — NEU: flüssige Steuerung (Snapshot-Leser, Toggles, Node-Detail)"
   "Workmap — LIVE: welche GPU ▶ welches Video + Auslastung (auto-refresh)"
   "Videos  — LIVE: Liste + Gesamtkosten + Kosten/Video (auto-refresh)"
   "Plan    — Offers suchen & direkt buchen"
@@ -324,17 +331,18 @@ while true; do
   echo -e "${C_DIM}   ↑/↓ bewegen · ENTER wählen · q beenden${C_RST}\n"
   choose "${LABELS[@]}"
   case "$REPLY" in
-    0) act_workmap;;
-    1) act_videos;;
-    2) act_plan;;
-    3) act_nodes;;
-    4) act_up;;
-    5) act_logs;;
-    6) act_setup_logs;;
-    7) act_down;;
-    8) act_pull;;
-    9) act_destroy;;
-    10) act_ssh;;
-    11|255) clear; echo "Tschüss."; exit 0;;
+    0) act_tui;;
+    1) act_workmap;;
+    2) act_videos;;
+    3) act_plan;;
+    4) act_nodes;;
+    5) act_up;;
+    6) act_logs;;
+    7) act_setup_logs;;
+    8) act_down;;
+    9) act_pull;;
+    10) act_destroy;;
+    11) act_ssh;;
+    12|255) clear; echo "Tschüss."; exit 0;;
   esac
 done
