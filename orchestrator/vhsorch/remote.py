@@ -333,19 +333,21 @@ class Remote:
       for lf in /workspace/work/logs/gpu*.log; do
         g=$(basename "$lf" .log); g=${g#gpu}
         info=$(awk '
-          /START: /  { busy=1; c=$0; sub(/.*START: /,"",c); clip=c; ph="" }
+          /START: /  { busy=1; c=$0; sub(/.*START: /,"",c); clip=c; ph=""; samp=""; dec="" }
           /PHASE /   { p=$0; sub(/.*PHASE /,"",p); sub(/:.*/,"",p); ph=p }
+          /Upscaling batch [0-9]+\/[0-9]+/ { s=$0; sub(/.*Upscaling batch /,"",s); sub(/[^0-9\/].*/,"",s); samp=s }
+          /Decoding batch [0-9]+\/[0-9]+/  { d=$0; sub(/.*Decoding batch /,"",d);  sub(/[^0-9\/].*/,"",d);  dec=d }
           /FERTIG:/  { busy=0 }
           /FAIL:/    { busy=0 }
           /SKIP/     { busy=0 }
-          END { printf "%d|%s|%s", busy+0, ph, clip }
+          END { printf "%d|%s|%s|%s|%s", busy+0, ph, samp, dec, clip }
         ' "$lf")
-        IFS="|" read -r busy ph clip <<<"$info"
+        IFS="|" read -r busy ph samp dec clip <<<"$info"
         if [ "$busy" = "1" ] && [ -n "$clip" ]; then
           pct=$(tail -n 80 "$lf" | grep -oaE "[0-9]+%" | tail -1)
-          echo "$g|busy|$ph|$pct|$clip"
+          echo "$g|busy|$ph|$pct|$samp|$dec|$clip"
         else
-          echo "$g|idle|||"
+          echo "$g|idle|||||"
         fi
       done
       echo "@GPUSTATS"
@@ -411,11 +413,12 @@ class Remote:
                 elif line.startswith("BOOTSTRAP="):
                     out["bootstrap_status"] = line[10:].strip()
             elif section == "@GPUACT":
-                parts = line.split("|", 4)
-                if len(parts) == 5 and parts[0].isdigit():
-                    gpu, state, phase, pct, clip = parts
+                parts = line.split("|", 6)
+                if len(parts) == 7 and parts[0].isdigit():
+                    gpu, state, phase, pct, samp, dec, clip = parts
                     out["gpus_activity"].append(
-                        (int(gpu), state, clip.strip(), phase.strip(), pct.strip()))
+                        (int(gpu), state, clip.strip(), phase.strip(),
+                         pct.strip(), samp.strip(), dec.strip()))
             elif section == "@GPUSTATS":
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) == 4 and parts[0].isdigit():

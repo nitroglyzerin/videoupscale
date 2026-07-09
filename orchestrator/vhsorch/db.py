@@ -149,6 +149,38 @@ class DB:
             (instance_id, time.time(), name),
         )
 
+    def claim_pending_clips(self, instance_id: int, limit: int) -> int:
+        """Weist bis zu `limit` Clips aus dem gemeinsamen pending-Pool dieser Node
+        zu (atomar). So holt sich auch eine SPÄT dazugekommene Node Arbeit."""
+        if limit <= 0:
+            return 0
+        with self.tx() as conn:
+            rows = conn.execute(
+                "SELECT name FROM clips WHERE status='pending' ORDER BY name LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+            now = time.time()
+            for r in rows:
+                conn.execute(
+                    "UPDATE clips SET status='assigned', node_id=?, assigned_at=? "
+                    "WHERE name=? AND status='pending'",
+                    (instance_id, now, r["name"]),
+                )
+            return len(rows)
+
+    def release_assigned_clips(self, instance_id: int, limit: int) -> int:
+        """Gibt bis zu `limit` NUR-zugewiesene (nicht hochgeladene) Clips einer Node
+        zurück in den pending-Pool — für die Balance, wenn eine Node zu viel hält."""
+        if limit <= 0:
+            return 0
+        cur = self._conn.execute(
+            "UPDATE clips SET status='pending', node_id=NULL, assigned_at=NULL "
+            "WHERE name IN (SELECT name FROM clips WHERE node_id=? AND status='assigned' "
+            "               ORDER BY name LIMIT ?)",
+            (instance_id, int(limit)),
+        )
+        return cur.rowcount
+
     def set_clip_status(self, name: str, status: str) -> None:
         done_at = time.time() if status == "done" else None
         self._conn.execute(

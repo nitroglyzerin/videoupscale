@@ -52,6 +52,32 @@ _PHASE_RANGE = {"Denoise": (0, 20), "Upscale": (20, 90), "Audio": (90, 100)}
 _PHASE_STEP = {"Denoise": "1/3", "Upscale": "2/3", "Audio": "3/3"}
 
 
+def _upscale_subpct(samp: str, dec: str) -> int:
+    """Echter Upscale-Fortschritt aus den SeedVR2-BATCH-Zählern (nicht dem
+    irreführenden Per-Batch-tqdm-%). SeedVR2 rechnet je Clip in Batches: erst
+    Sampling ('Upscaling batch N/M'), dann VAE-Decoding ('Decoding batch N/M').
+    Fortschritt = erledigte Batches / (Sampling- + Decoding-Batches), sodass der
+    Balken beim Übergang Sampling->Decoding NICHT bei ~100% klebt, sondern das
+    Decoding als zweite Hälfte weiterzählt. -1 = keine Batch-Info (roher %).
+    """
+    def parse(x: str):
+        try:
+            n, m = x.split("/")
+            n, m = int(n), int(m)
+            return (n, m) if m > 0 else None
+        except (ValueError, AttributeError):
+            return None
+
+    s = parse(samp)
+    d = parse(dec)
+    if not s and not d:
+        return -1
+    s_n, s_m = s if s else (0, (d[1] if d else 1))
+    d_n, d_m = d if d else (0, s_m)          # Decode noch nicht begonnen -> 0/gleich viele
+    total = s_m + d_m
+    return int(round(100 * (s_n + d_n) / total)) if total > 0 else -1
+
+
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -413,20 +439,56 @@ class Scheduler:
             self._release(iid)
 
     def distribute(self) -> None:
-        """Weist pending Clips kapazitätsgewichtet den ready-Nodes zu."""
+        """Balanciert die Clips über die ready-Nodes: jede Node hält höchstens
+        `GPUs × INFLIGHT_PER_GPU` Clips „in Arbeit" (assigned+uploaded), der Rest
+        bleibt im gemeinsamen pending-Pool. Unterfüllte Nodes holen sich Clips aus
+        dem Pool, überladene geben Überschuss zurück. Läuft jeden Tick (single-
+        threaded im Work-Loop). So bekommt auch eine SPÄT dazugebuchte Node Arbeit,
+        ohne dass eine früh gestartete Node gierig alles greift."""
         nodes = [n for n in self.db.active_nodes() if n["status"] == "ready"]
         if not nodes:
             return
-        pending = self.db.pending_clips()
+        # 1. Überschuss überladener Nodes zurück in den Pool + freie Kapazität je Node.
+        free: dict[int, int] = {}
+        weight: dict[int, int] = {}
+        for node in nodes:
+            iid = node["instance_id"]
+            gpus = node["num_gpus"] or 1
+            target = max(1, gpus * self.cfg.inflight_per_gpu)
+            inflight = (len(self.db.clips_for_node(iid, "assigned"))
+                        + len(self.db.clips_for_node(iid, "uploaded")))
+            if inflight > target:
+                rel = self.db.release_assigned_clips(iid, inflight - target)
+                if rel:
+                    log(f"Node {iid}: {rel} überschüssige Clips zurück in den Pool.")
+                inflight = target
+            free[iid] = max(0, target - inflight)
+            weight[iid] = gpus
+        # 2. Gewichteter Round-Robin: reihum je Node `weight` Slots, bis Kapazität
+        #    voll — so teilen sich auch wenige Clips fair auf mehrere Nodes.
+        slots: list[int] = []
+        remaining = dict(free)
+        while any(remaining[i] > 0 for i in remaining):
+            for iid in remaining:
+                for _ in range(weight[iid]):
+                    if remaining[iid] > 0:
+                        slots.append(iid)
+                        remaining[iid] -= 1
+        if not slots:
+            return
+        pending = self.db.pending_clips(limit=len(slots))
         if not pending:
             return
-        slots: list[int] = []
-        for n in nodes:
-            slots += [n["instance_id"]] * max(1, n["num_gpus"])
-        with self.db.tx():
+        now = time.time()
+        per_node: dict[int, int] = {}
+        with self.db.tx() as conn:
             for i, clip in enumerate(pending):
-                self.db.assign_clip(clip["name"], slots[i % len(slots)])
-        log(f"{len(pending)} Clips auf {len(nodes)} Node(s) verteilt.")
+                iid = slots[i]
+                conn.execute(
+                    "UPDATE clips SET status='assigned', node_id=?, assigned_at=? "
+                    "WHERE name=? AND status='pending'", (iid, now, clip["name"]))
+                per_node[iid] = per_node.get(iid, 0) + 1
+        log("Verteilt: " + ", ".join(f"Node {i}+{n}" for i, n in per_node.items()))
 
     def dispatch_service(self) -> None:
         """Dispatcht pro Node EINEN Service-Task in den Heavy-Pool (single-flight):
