@@ -261,12 +261,19 @@ class AddNodeScreen(ModalScreen):
 
     BINDINGS = [
         Binding("escape,q", "close", "Abbrechen"),
+        Binding("g", "cycle_gpus", "min. GPUs"),
+        Binding("t", "cycle_type", "GPU-Typ"),
         # Zifferntaste wählt ein Offer — via on_key.
     ]
 
+    # Wählbare Mindest-GPU-Anzahl und GPU-Typ-Filter (None = beide erlaubten).
+    _GPU_STEPS = [1, 2, 4, 6, 8]
+    _TYPE_OPTS = [("beide", None), ("RTX 5090", ["RTX 5090"]), ("RTX 4090", ["RTX 4090"])]
+
     def __init__(self, min_gpus: int = 4) -> None:
         super().__init__()
-        self._min_gpus = min_gpus
+        self._min_gpus = min_gpus if min_gpus in self._GPU_STEPS else 4
+        self._type_idx = 0
         self._offers: list = []
         self._loading = True
         self._error: Optional[str] = None
@@ -279,13 +286,30 @@ class AddNodeScreen(ModalScreen):
         self._repaint()
         self._search()
 
+    def _restart_search(self) -> None:
+        self._loading = True
+        self._error = None
+        self._offers = []
+        self._repaint()
+        self._search()
+
+    def action_cycle_gpus(self) -> None:
+        i = (self._GPU_STEPS.index(self._min_gpus) + 1) % len(self._GPU_STEPS)
+        self._min_gpus = self._GPU_STEPS[i]
+        self._restart_search()
+
+    def action_cycle_type(self) -> None:
+        self._type_idx = (self._type_idx + 1) % len(self._TYPE_OPTS)
+        self._restart_search()
+
     @work(thread=True, exclusive=True)
     def _search(self) -> None:
         try:
             from .vast import VastClient
             vast = VastClient(self.app.cfg.vast_api_key)
             offers = vast.search_offers(disk_gb=self.app.cfg.vast_disk_gb,
-                                        min_gpus=self._min_gpus)
+                                        min_gpus=self._min_gpus,
+                                        gpu_names=self._TYPE_OPTS[self._type_idx][1])
             self.app.call_from_thread(self._got_offers, offers[:9], None)
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._got_offers, [], str(e)[:200])
@@ -302,22 +326,29 @@ class AddNodeScreen(ModalScreen):
         if not self.is_mounted:
             return
         body = self.query_one("#addbody", Static)
+        typename = self._TYPE_OPTS[self._type_idx][0]
+        filt = Text()
+        filt.append(f"Filter: ≥{self._min_gpus} GPUs · {typename}", style="bold")
+        filt.append("   [g] min. GPUs ändern · [t] GPU-Typ ändern", style="grey62")
+
+        def panel(inner, border="cyan"):
+            body.update(Panel(Group(filt, Text(""), inner),
+                              title="Node dazu", border_style=border))
+
         if self._loading:
-            body.update(Panel(Text("Suche Offers … (Esc = abbrechen)"),
-                              title="Node dazu", border_style="cyan"))
+            panel(Text("Suche Offers … (Esc = abbrechen)"))
             return
         if self._error:
-            body.update(Panel(Text(f"Fehler: {self._error}", style="red"),
-                              title="Node dazu", border_style="red"))
+            panel(Text(f"Fehler: {self._error}", style="red"), border="red")
             return
         if not self._offers:
-            body.update(Panel(Text("Keine buchbaren Offers gefunden."),
-                              title="Node dazu", border_style="yellow"))
+            panel(Text("Keine Offers für diesen Filter — [g]/[t] anpassen."),
+                  border="yellow")
             return
         t = Table(box=None, pad_edge=False)
         t.add_column("#", justify="right")
         t.add_column("GPU")
-        t.add_column("n", justify="right")
+        t.add_column("GPUs", justify="right")
         t.add_column("$/h", justify="right")
         t.add_column("DLPerf/$", justify="right")
         t.add_column("Ort")
@@ -330,10 +361,10 @@ class AddNodeScreen(ModalScreen):
         if auto and q.get("total", 0) and (q.get("pending", 0) + q.get("assigned", 0)
                                            + q.get("uploaded", 0)) == 0:
             warn = "\n⚠ Queue fast leer + AUTO_DESTROY: neue Node wird evtl. sofort zerstört."
-        body.update(Panel(
-            Group(t, Text(f"Zifferntaste 1–{len(self._offers)} = buchen · Esc = abbrechen"
-                          + warn, style="grey62")),
-            title="Node dazu — Offer wählen", border_style="cyan"))
+        panel(Group(
+            t,
+            Text(f"Spalte 'GPUs' = Karten dieser Maschine. Zifferntaste 1–{len(self._offers)} "
+                 f"= buchen · Esc = abbrechen" + warn, style="grey62")))
 
     def on_key(self, event) -> None:
         if self._loading or self._error:
@@ -546,7 +577,10 @@ class HomeScreen(Screen):
         Binding("v", "videos", "Videos"),
         Binding("f", "finalize", "Finalisieren", show=False),
         Binding("l", "log", "Log"),
-        Binding("q", "quit", "Beenden"),
+        # 'app.quit' (nicht 'quit'): eine Screen-Bindung löst die Aktion im
+        # Screen-Namespace auf — action_quit liegt aber auf der App. Ohne den
+        # 'app.'-Präfix schließt 'q' still NICHT (nur Textuals eingebautes ctrl+q).
+        Binding("q", "app.quit", "Beenden"),
         # Zifferntasten öffnen die N-te Node — via on_key (saubere Ziffer).
     ]
 

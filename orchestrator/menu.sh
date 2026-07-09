@@ -234,9 +234,14 @@ act_plan() {
 
 # Neue Textual-TUI starten (reiner Leser des Scheduler-Snapshots, immer flüssig).
 # 'docker compose run --rm' allokiert ein TTY (im Gegensatz zu ORCH_BG mit -T),
-# die interaktive TUI braucht das. Der Scheduler muss laufen (Menüpunkt 'Up'),
-# sonst zeigt die TUI 'Warte auf Snapshot …'.
-act_tui()  { clear; $DC run --rm orchestrator tui; }
+# die interaktive TUI braucht das. Vorher den Loop sicherstellen ('up -d'),
+# damit sofort Live-Daten im Snapshot stehen (sonst 'Warte auf Snapshot …').
+act_tui() {
+  clear
+  echo -e "${C_TITLE}== TUI ==${C_RST}  stelle Loop sicher …"
+  $DC up -d >/dev/null 2>&1
+  $DC run --rm orchestrator tui
+}
 
 act_up()   { clear; echo -e "${C_TITLE}== Loop starten (Hintergrund) ==${C_RST}\n"; $DC up -d && echo -e "\n${C_OK}Loop läuft.${C_RST} Logs im Menüpunkt 'Loop-Logs'."; pause; }
 act_logs() { clear; echo -e "${C_TITLE}== Loop-Logs (Strg-C = zurück) ==${C_RST}\n"; trap ' ' INT; $DC logs -f --tail=50; trap - INT; pause; }
@@ -323,12 +328,19 @@ LABELS=(
   "Beenden"
 )
 
+# Direkt in die neue TUI starten (Default-Wunsch). Nach dem Schließen der TUI
+# landet man im klassischen Menü (Fallback für Down/SSH/Setup-Logs/alte Views;
+# TUI erneut = Menüpunkt 1). '--no-tui' überspringt den Direktstart.
+if [ "${1:-}" != "--no-tui" ]; then
+  act_tui
+fi
+
 while true; do
   clear
   echo -e "${C_TITLE}╔══════════════════════════════════════════════╗${C_RST}"
   echo -e "${C_TITLE}║   VHS-Upscale-Orchestrator — Steuerung        ║${C_RST}"
   echo -e "${C_TITLE}╚══════════════════════════════════════════════╝${C_RST}"
-  echo -e "${C_DIM}   ↑/↓ bewegen · ENTER wählen · q beenden${C_RST}\n"
+  echo -e "${C_DIM}   ↑/↓ bewegen · ENTER wählen · q beenden · (TUI = Punkt 1)${C_RST}\n"
   choose "${LABELS[@]}"
   case "$REPLY" in
     0) act_tui;;

@@ -178,8 +178,9 @@ nimmt es nächsten Tick auf (`refresh_nodes` bootstrappt, `push_and_run` pusht M
 
 Neu (reine UI-Verdrahtung): `[a]` „Node dazu" ist auf dem Dashboard **dauerhaft** sichtbar — egal ob
 0 oder 5 Nodes laufen, egal ob gerade verarbeitet wird. Derselbe Book-Flow wie Flow 1, danach
-Auto-Landung auf dem Node-Detail der Neuen. Optional `--min-gpus` im Overlay wählbar (existiert in
-`cli.py`, Default 4; **8 testen** laut Backlog).
+Auto-Landung auf dem Node-Detail der Neuen. Im Overlay wählbar: **`[g]` min. GPU-Anzahl** (1/2/4/6/8)
+und **`[t]` GPU-Typ** (beide / RTX 5090 / RTX 4090) — die Offer-Liste sucht bei jeder Änderung neu; die
+Spalte „GPUs" zeigt die Kartenzahl je Maschine, also bucht man die gewünschte Anzahl über das Offer.
 
 > **Warnung im Book-Flow:** Läuft `AUTO_DESTROY=1` und ist die Queue gerade fast leer, könnte
 > `maybe_destroy` die frische Node sofort killen → vor dem `book` einen Hinweis zeigen.

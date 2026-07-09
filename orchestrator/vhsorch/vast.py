@@ -116,19 +116,21 @@ class VastClient:
 
     # --- Suche ---------------------------------------------------------------
     def search_offers(self, disk_gb: int, min_gpus: int = 4,
-                      min_reliability: float = 0.995) -> list[Offer]:
+                      min_reliability: float = 0.995,
+                      gpu_names: Optional[list[str]] = None) -> list[Offer]:
         """Sucht Offers mit den HARTEN Filtern aus der Anforderung.
 
-        Filter: GPU RTX 4090|5090, verified, rentable, num_gpus>=min_gpus,
-        reliability>=min_reliability, disk_space>=disk_gb.
-        Sortiert serverseitig nach Preis-Leistung (dlperf_per_dphtotal desc).
+        Filter: GPU-Typ (Default RTX 4090|5090, über gpu_names einschränkbar),
+        verified, rentable, num_gpus>=min_gpus, reliability>=min_reliability,
+        disk_space>=disk_gb. Sortiert nach Preis-Leistung (dlperf_per_dphtotal).
         """
+        allowed = gpu_names or ALLOWED_GPUS
         query = {
             "verified": {"eq": True},
             "rentable": {"eq": True},
             "rented": {"eq": False},
             "num_gpus": {"gte": min_gpus},
-            "gpu_name": {"in": ALLOWED_GPUS},
+            "gpu_name": {"in": allowed},
             "reliability2": {"gte": min_reliability},
             "disk_space": {"gte": disk_gb},
             "type": "on-demand",
@@ -141,7 +143,7 @@ class VastClient:
         # API einen unerwarteten Namen (z.B. "RTX 4090 D") durchreicht.
         return [
             o for o in offers
-            if any(g in o.gpu_name for g in ALLOWED_GPUS)
+            if any(g in o.gpu_name for g in allowed)
             and o.num_gpus >= min_gpus
             and o.reliability >= min_reliability
         ]
