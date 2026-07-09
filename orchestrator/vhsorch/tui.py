@@ -138,6 +138,23 @@ def _flag(label: str, on: bool, extra: str = "") -> Text:
     return t
 
 
+def _busy_desc(busy: Optional[str]) -> tuple[str, str]:
+    """Klartext + Farbe zum busy-Flag einer Node (statt rohem 'cmd:models')."""
+    if not busy:
+        return "bereit für Aktionen", "grey50"
+    if "models" in busy:
+        return "Modelle-Push läuft (~4 GB — kann einige Minuten dauern) …", "yellow"
+    if busy == "service":
+        return "Node wird bedient (Modelle/Worker/Upload) …", "yellow"
+    if "bootstrap" in busy:
+        return "Bootstrap läuft …", "yellow"
+    if "pull" in busy:
+        return "Ergebnisse werden gepullt …", "yellow"
+    if "destroy" in busy:
+        return "wird zerstört …", "red"
+    return f"läuft: {busy}", "yellow"
+
+
 # ===========================================================================
 #  Modals
 # ===========================================================================
@@ -613,13 +630,15 @@ class NodeScreen(Screen):
         boot_extra = n.get("bootstrap_status") or ""
         if busy == "bootstrap":
             boot_extra = "… läuft"
+        pushing_models = (busy and ("models" in busy or busy == "service")
+                          and not f["models_pushed"])
         setup.add_row(_flag("Bootstrap [b]", f["bootstrap_started"], boot_extra),
                       _flag("Modelle [m]", f["models_pushed"],
-                            "pushing …" if busy == "service" and not f["models_pushed"] else ""))
+                            "wird gepusht …" if pushing_models else ""))
+        busy_txt, busy_col = _busy_desc(busy)
         setup.add_row(_flag("Worker [w]", f["worker_running"],
                             f"{n['busy_gpus']}/{n['num_gpus']} aktiv" if f["worker_running"] else ""),
-                      Text(f"busy: {busy}" if busy else "bereit für Aktionen",
-                           style="yellow" if busy else "grey50"))
+                      Text(busy_txt, style=busy_col))
 
         # GPU-Grid.
         gtab = Table.grid(padding=(0, 1))
