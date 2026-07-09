@@ -70,6 +70,7 @@ class Config:
     inflight_per_gpu: int
     probe_interval: int   # Sekunden zwischen (read-only) SSH-Probes der Nodes
     heavy_workers: int    # parallele Slots für lange Transfers (push_models/push/pull)
+    model_node_dl_timeout: int  # max. Sekunden je Modelldatei für den Node-Selbst-Download
     # Kostenmodell (Video-/Kostenübersicht)
     cost_rate_x: float
     gpu_cost_factors: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_GPU_FACTORS))
@@ -124,6 +125,7 @@ class Config:
             inflight_per_gpu=int(os.environ.get("INFLIGHT_PER_GPU", "2")),
             probe_interval=int(os.environ.get("PROBE_INTERVAL", "5")),
             heavy_workers=int(os.environ.get("HEAVY_WORKERS", "4")),
+            model_node_dl_timeout=int(os.environ.get("MODEL_NODE_DL_TIMEOUT", "600")),
             cost_rate_x=float(os.environ.get("COST_RATE_X", "0.01")),
             gpu_cost_factors=_parse_gpu_factors(os.environ.get("GPU_COST_FACTORS", "")),
             gpu_factor_default=float(os.environ.get("GPU_FACTOR_DEFAULT", "1.0")),

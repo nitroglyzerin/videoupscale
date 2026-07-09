@@ -122,6 +122,43 @@ class Remote:
         except subprocess.TimeoutExpired:
             return False
 
+    def download_models(self, specs: list[tuple[str, str, int]],
+                        remote_dir: str = "/workspace/seedvr2/models/SEEDVR2/",
+                        per_file_max_time: int = 600,
+                        timeout: Optional[int] = None,
+                        connect_timeout: int = 25) -> bool:
+        """Lässt die NODE die Modelle selbst von HuggingFace laden (schneller Pfad).
+
+        specs = [(dateiname, url, erwartete_bytes)]. Idempotent: bereits vollständig
+        vorhandene Dateien (Größe >= erwartet) werden übersprungen. Lädt atomar über
+        .part -> mv, verifiziert danach die Größe. Rückgabe True, wenn ALLE Dateien
+        vollständig auf der Node liegen.
+
+        --ipv4: umgeht die häufige Vast-Falle 'HF löst nur IPv6 auf + IPv6 tot ->
+        Connect-Timeout'. Scheitert der Download (Netz/HF), meldet die Node ok=0 und
+        der Aufrufer fällt auf den orchestrator-seitigen rsync-Push zurück.
+        """
+        rdir = remote_dir.rstrip("/")
+        parts = [f"mkdir -p '{rdir}'", "ok=1"]
+        for name, url, size in specs:
+            dst = f"{rdir}/{name}"
+            parts.append(
+                f'cur=$(stat -c%s "{dst}" 2>/dev/null || echo 0)\n'
+                f'if [ "$cur" -lt {size} ]; then\n'
+                f'  echo "hole {name} …"\n'
+                f'  curl -fL --ipv4 --connect-timeout {connect_timeout} '
+                f'--max-time {per_file_max_time} --retry 2 --retry-delay 3 '
+                f'"{url}" -o "{dst}.part" && mv "{dst}.part" "{dst}" || ok=0\n'
+                f'  got=$(stat -c%s "{dst}" 2>/dev/null || echo 0)\n'
+                f'  [ "$got" -ge {size} ] || ok=0\n'
+                f"fi")
+        parts.append('echo "DOWNLOAD_OK=$ok"')
+        script = "\n".join(parts)
+        if timeout is None:
+            timeout = per_file_max_time * max(1, len(specs)) + 120
+        res = self.exec(script, timeout=timeout, connect_timeout=connect_timeout)
+        return "DOWNLOAD_OK=1" in res.stdout
+
     def push_models(self, local_dir: str,
                     remote_dir: str = "/workspace/seedvr2/models/SEEDVR2/",
                     timeout: int = 2400) -> bool:
@@ -142,7 +179,12 @@ class Remote:
         # Zielverzeichnis sicherstellen (rsync legt nur die letzte Komponente an).
         self.exec(f"mkdir -p {remote_dir}", timeout=30)
         cmd = [
-            "rsync", "-a", "--partial", "--partial-dir=.rsync-partial",
+            # --size-only: nur nach Größe entscheiden (nicht mtime). So werden
+            # Dateien, die die Node bereits selbst geladen hat (andere mtime, aber
+            # korrekte Größe), NICHT unnötig neu übertragen — der rsync ergänzt nur,
+            # was der Node-Download nicht geschafft hat. Für unveränderliche Modelle
+            # sicher (gleicher Name+Größe = gleiche Datei).
+            "rsync", "-a", "--size-only", "--partial", "--partial-dir=.rsync-partial",
             "--timeout=120", "--info=progress2",
             "-e", self._rsync_e(),
             src,

@@ -246,10 +246,10 @@ class Scheduler:
                     cid, "done" if ok else "failed",
                     "Bootstrap angestoßen" if ok else "SSH fehlgeschlagen")
             elif action == "models":
-                ok = self._push_models(node)
+                ok = self._provide_models(node)
                 self.db.set_command_status(
                     cid, "done" if ok else "failed",
-                    "Modelle gepusht" if ok else "Push fehlgeschlagen/Modelle fehlen")
+                    "Modelle bereitgestellt" if ok else "Bereitstellen fehlgeschlagen")
             elif action == "worker":
                 # IDEMPOTENT: läuft der Worker schon, NICHT erneut starten (sonst
                 # zweiter Worker-Baum -> OOM). remote.start_worker ist zwar jetzt
@@ -458,10 +458,11 @@ class Scheduler:
             if node["status"] != "ready":
                 return
 
-            # 2) SeedVR2-Modelle EINMAL pushen (Worker startet erst danach).
+            # 2) SeedVR2-Modelle EINMAL bereitstellen (Node-Download -> rsync-
+            #    Fallback). Worker startet erst danach.
             if not node["models_pushed"]:
-                if not self._push_models(node):
-                    return  # Modelle fehlen/Push offen -> Worker wartet.
+                if not self._provide_models(node):
+                    return  # Modelle noch nicht da -> Worker wartet.
 
             # 3) Worker früh starten (idempotent).
             if not r.worker_running():
@@ -495,8 +496,46 @@ class Scheduler:
         finally:
             self._release(iid)
 
+    def _provide_models(self, node) -> bool:
+        """Stellt die SeedVR2-Modelle auf der Node bereit. True bei Erfolg.
+
+        Strategie: ERST die Node selbst von HF laden lassen (schneller Pfad, wenn
+        das Node-Netz HF erreicht — curl --ipv4 umgeht die IPv6-Falle). Scheitert
+        das, FALLBACK auf den orchestrator-seitigen rsync-Push (zuverlässig, ggf.
+        langsam). Der Fallback-rsync ergänzt per --size-only nur, was der Node-
+        Download nicht geschafft hat.
+        """
+        iid = node["instance_id"]
+        r = self._remote(node)
+        if r is None:
+            return False
+        specs: list[tuple[str, str, int]] = []
+        for name, url in SEEDVR2_MODEL_FILES.items():
+            fp = os.path.join(self.cfg.models_dir, name)
+            if os.path.isfile(fp):
+                specs.append((name, url, os.path.getsize(fp)))
+        if len(specs) != len(SEEDVR2_MODEL_FILES):
+            log(f"Node {iid}: Modelle im Home-Cache unvollständig ({self.cfg.models_dir}) "
+                f"— warte auf Auto-Fetch / 'vhsorch fetch-models'.")
+            return False
+
+        # 1./2. Node lädt selbst (überspringt bereits vollständige Dateien).
+        log(f"Node {iid}: Modelle — versuche Node-Selbst-Download (HF, --ipv4) …")
+        per = self.cfg.model_node_dl_timeout
+        try:
+            if r.download_models(specs, per_file_max_time=per):
+                self.db.update_node(iid, models_pushed=1)
+                log(f"Node {iid}: Modelle von der Node selbst geladen (kein rsync nötig).")
+                return True
+        except Exception as e:  # noqa: BLE001 — Fallback greift
+            log(f"Node {iid}: Node-Download-Fehler ({e}) — Fallback rsync.")
+
+        # 3. Fallback: rsync vom Orchestrator.
+        log(f"Node {iid}: Node-Download unvollständig — Fallback rsync vom Orchestrator …")
+        return self._push_models(node)
+
     def _push_models(self, node) -> bool:
-        """Pusht die SeedVR2-Modelle einmalig auf die Node. True bei Erfolg."""
+        """Pusht die SeedVR2-Modelle per rsync auf die Node (Fallback). True bei Erfolg."""
         iid = node["instance_id"]
         have = all(os.path.isfile(os.path.join(self.cfg.models_dir, n))
                    for n in SEEDVR2_MODEL_FILES)
