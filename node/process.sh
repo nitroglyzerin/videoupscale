@@ -49,6 +49,11 @@ log()  { echo -e "\033[1;36m[process]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[process WARN]\033[0m $*" >&2; }
 die()  { echo -e "\033[1;31m[process FEHLER]\033[0m $*" >&2; exit 1; }
 
+# SOFORT loggen (vor dem evtl. hängenden nvidia-smi/cd), damit run.log nie leer
+# ist, wenn process.sh wirklich läuft. Leeres run.log + Worker="läuft" bedeutet
+# dann: hängt VOR dieser Zeile (mkdir/flock) oder pgrep-Fehlalarm.
+log "process.sh gestartet (PID $$) — prüfe Umgebung & GPUs …"
+
 # In das SeedVR2-Verzeichnis wechseln: inference_cli.py sucht/erwartet das
 # Modell unter ./models/SEEDVR2 (CWD-relativ). Ein festes CWD stellt sicher,
 # dass es das in bootstrap.sh VORAB geladene Modell findet — kein Laufzeit-

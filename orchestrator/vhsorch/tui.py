@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from typing import Optional
 
@@ -582,6 +583,7 @@ class NodeScreen(Screen):
         Binding("u", "cmd_pull", "Pull"),
         Binding("d", "cmd_drain", "Drain"),
         Binding("x", "cmd_destroy", "Destroy"),
+        Binding("s", "ssh", "SSH"),
         Binding("l", "node_log", "Node-Log"),
     ]
 
@@ -687,8 +689,8 @@ class NodeScreen(Screen):
             alarm = Text("⚠ ready, aber keine GPU aktiv trotz Backlog — Worker gecrasht? "
                          "[w] Worker neu starten.", style="bold red")
 
-        actions = Text("[b] Bootstrap  [m] Modelle  [w] Worker  [u] Pull  "
-                       "[d] Drain  [x] Destroy  [l] Node-Log  [Esc] zurück", style="grey62")
+        actions = Text("[b] Bootstrap  [m] Modelle  [w] Worker  [u] Pull  [d] Drain  "
+                       "[x] Destroy  [s] SSH  [l] Node-Log  [Esc] zurück", style="grey62")
 
         parts = [head, Text(""), setup, Text(""), gtab, clip_line]
         if alarm:
@@ -731,6 +733,27 @@ class NodeScreen(Screen):
 
     def action_node_log(self) -> None:
         self.app.push_screen(NodeLogScreen(self.instance_id))
+
+    def action_ssh(self) -> None:
+        n = self._node()
+        if not n or not n.get("ssh"):
+            self.app.notify("Kein SSH-Endpunkt (Node bootet noch?).", severity="warning")
+            return
+        host, _, port = n["ssh"].partition(":")
+        key = self.app.cfg.ssh_key_path
+        cmd = ["ssh", "-p", port or "22", "-i", key,
+               "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+               "-o", "LogLevel=ERROR", f"root@{host}"]
+        # Textual das Terminal überlassen (Alt-Screen verlassen), interaktives ssh
+        # im Vordergrund, danach zurück in die TUI.
+        try:
+            with self.app.suspend():
+                print(f"\n== SSH root@{host}:{port} ==   "
+                      f"(exit / Strg-D -> zurück zur TUI)\n", flush=True)
+                subprocess.run(cmd)
+                input("\n── ssh beendet — ENTER für zurück zur TUI ──")
+        except Exception as e:  # noqa: BLE001
+            self.app.notify(f"SSH nicht möglich: {e}", severity="error")
 
     def action_back(self) -> None:
         self.app.pop_screen()
