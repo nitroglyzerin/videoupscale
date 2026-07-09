@@ -127,17 +127,23 @@ class Remote:
                     timeout: int = 2400) -> bool:
         """rsync die vorab (zuhause) geladenen SeedVR2-Modelle auf die Node.
 
-        Einmal pro Node (Scheduler-Flag models_pushed). Idempotent via
-        --ignore-existing (bereits vorhandene Modelle werden übersprungen).
-        KEIN -z: safetensors sind kaum komprimierbar -> spart CPU. Harte
-        Timeouts, damit ein hängender 4-GB-Transfer den Tick nicht blockiert.
+        Einmal pro Node (Scheduler-Flag models_pushed). Idempotent über rsync's
+        Default (überspringt Dateien mit gleicher Größe+mtime dank -a).
+
+        WICHTIG: KEIN --ignore-existing! In Kombination mit --partial würde eine
+        abgebrochene Teilübertragung (partielle Zieldatei) beim nächsten Versuch
+        als „existiert" ÜBERSPRUNGEN — die Node bekäme ein UNVOLLSTÄNDIGES Modell,
+        rsync meldete aber Erfolg (models_pushed=1) und die Inferenz scheiterte.
+        Stattdessen --partial-dir: Teildaten liegen in einem Unterordner, die
+        FINALE Datei erscheint erst, wenn sie komplett ist (kein korrupter Rest).
+        KEIN -z: safetensors sind kaum komprimierbar -> spart CPU.
         """
         src = local_dir if local_dir.endswith("/") else local_dir + "/"
         # Zielverzeichnis sicherstellen (rsync legt nur die letzte Komponente an).
         self.exec(f"mkdir -p {remote_dir}", timeout=30)
         cmd = [
-            "rsync", "-a", "--partial", "--ignore-existing", "--timeout=120",
-            "--info=progress2",
+            "rsync", "-a", "--partial", "--partial-dir=.rsync-partial",
+            "--timeout=120", "--info=progress2",
             "-e", self._rsync_e(),
             src,
             f"{self.target}:{remote_dir}",
@@ -320,6 +326,8 @@ class Remote:
           # \r (tqdm-Fortschritt) zu \n machen, Leerzeilen weg, letzte 10 Zeilen.
           tail -c 2000 "$lf" 2>/dev/null | tr "\r" "\n" | grep -v "^[[:space:]]*$" | tail -n 10
         done; } 2>/dev/null || true
+      echo "@MODELS"
+      du -sb /workspace/seedvr2/models/SEEDVR2 2>/dev/null | cut -f1 || true
       echo "@END"
     '''
 
@@ -337,7 +345,7 @@ class Remote:
         empty = {
             "reachable": False, "process_present": False, "worker_running": False,
             "bootstrap_status": "", "gpus_activity": [], "gpu_stats": {},
-            "final": [], "fails": [], "log_tail": [],
+            "final": [], "fails": [], "log_tail": [], "models_bytes": 0,
         }
         res = self.exec(self._PROBE_SNIPPET, timeout=timeout, connect_timeout=connect_timeout)
         if res.returncode != 0:
@@ -348,7 +356,8 @@ class Remote:
         section = "head"
         for raw in res.stdout.splitlines():
             line = raw.rstrip("\n")
-            if line in ("@GPUACT", "@GPUSTATS", "@FINAL", "@FAILS", "@TAIL", "@END"):
+            if line in ("@GPUACT", "@GPUSTATS", "@FINAL", "@FAILS", "@TAIL",
+                        "@MODELS", "@END"):
                 section = line
                 continue
             if section == "head":
@@ -382,6 +391,10 @@ class Remote:
                 # Roh übernehmen (inkl. Kopfzeilen ── gpuN ──), max. ~80 Zeilen.
                 if len(out["log_tail"]) < 80:
                     out["log_tail"].append(line)
+            elif section == "@MODELS":
+                s = line.strip()
+                if s.isdigit():
+                    out["models_bytes"] = int(s)
         out["gpus_activity"].sort(key=lambda t: t[0])
         return out
 

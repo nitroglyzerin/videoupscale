@@ -630,6 +630,13 @@ class Scheduler:
         by_node = self.db.counts_by_node()
         active = self.db.active_nodes()
 
+        # Erwartete Modell-Gesamtgröße (Home-Cache) — für die Push-Fortschrittsanzeige.
+        models_total = 0
+        for name in SEEDVR2_MODEL_FILES:
+            fp = os.path.join(self.cfg.models_dir, name)
+            if os.path.isfile(fp):
+                models_total += os.path.getsize(fp)
+
         dph_total = sum(n["dph"] or 0.0 for n in active)
         oldest = min((n["created_at"] for n in active), default=now)
         hours = (now - oldest) / 3600 if active else 0.0
@@ -686,6 +693,8 @@ class Scheduler:
                 },
                 "bootstrap_status": p.get("bootstrap_status", "") if p else "",
                 "log_tail": p.get("log_tail", []) if p else [],
+                "models_bytes": p.get("models_bytes", 0) if p else 0,
+                "models_total": models_total,
                 "created_at": n["created_at"],
                 "uptime_h": round((now - (n["created_at"] or now)) / 3600, 2),
                 "cost_accrued": round((n["dph"] or 0.0)

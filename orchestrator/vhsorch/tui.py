@@ -259,8 +259,14 @@ class NodeLogScreen(ModalScreen):
         else:
             lines = node.get("log_tail") or []
             if not lines:
-                body = Text("(noch keine Logausgabe — Worker läuft evtl. noch nicht, "
-                            "oder die Probe war noch nicht dran)", style="grey62")
+                if not (node.get("flags") or {}).get("models_pushed"):
+                    body = Text("(noch keine Node-Logs — der Modell-Push läuft "
+                                "ORCHESTRATOR-seitig (rsync), steht also nicht hier. "
+                                "Fortschritt: Zeile 'Modelle' in der Node-Ansicht, "
+                                "oder 'docker compose logs -f'.)", style="grey62")
+                else:
+                    body = Text("(noch keine Logausgabe — Worker läuft evtl. noch nicht, "
+                                "oder die Probe war noch nicht dran)", style="grey62")
             else:
                 body = Text()
                 for ln in lines:
@@ -632,9 +638,17 @@ class NodeScreen(Screen):
             boot_extra = "… läuft"
         pushing_models = (busy and ("models" in busy or busy == "service")
                           and not f["models_pushed"])
+        models_extra = ""
+        if pushing_models:
+            mb = n.get("models_bytes", 0) or 0
+            mt = n.get("models_total", 0) or 0
+            if mt:
+                models_extra = (f"wird gepusht … {mb/1e9:.1f}/{mt/1e9:.1f} GB "
+                                f"({100 * mb // mt}%)")
+            else:
+                models_extra = "wird gepusht …"
         setup.add_row(_flag("Bootstrap [b]", f["bootstrap_started"], boot_extra),
-                      _flag("Modelle [m]", f["models_pushed"],
-                            "wird gepusht …" if pushing_models else ""))
+                      _flag("Modelle [m]", f["models_pushed"], models_extra))
         busy_txt, busy_col = _busy_desc(busy)
         setup.add_row(_flag("Worker [w]", f["worker_running"],
                             f"{n['busy_gpus']}/{n['num_gpus']} aktiv" if f["worker_running"] else ""),
