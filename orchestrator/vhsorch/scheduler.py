@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .config import Config, SEEDVR2_MODEL_FILES
 from .db import DB
 from .ingest import Ingest
+from .models import ensure_models_cached, models_present
 from .remote import Remote
 from .vast import VastClient
 
@@ -122,6 +123,12 @@ class Scheduler:
         stuck = self.db.requeue_running_commands()
         if stuck:
             log(f"{stuck} unterbrochene(s) Command(s) nach Neustart erneut eingereiht.")
+        # SeedVR2-Modelle automatisch in den Home-Cache laden, falls sie fehlen —
+        # im Hintergrund (der ~4-GB-Download darf den Loop nicht blockieren). Bis
+        # sie da sind, wartet _push_models ohnehin (Worker startet erst mit Modellen).
+        if not models_present(self.cfg):
+            threading.Thread(target=self._fetch_models_bg,
+                             name="fetch-models", daemon=True).start()
         threading.Thread(target=self._probe_loop, name="prober", daemon=True).start()
         threading.Thread(target=self._work_loop, name="worker-tick", daemon=True).start()
         while True:
@@ -147,6 +154,18 @@ class Scheduler:
             except Exception as e:  # noqa: BLE001
                 log(f"tick-Fehler (weiter): {e}")
             time.sleep(self.cfg.poll_interval)
+
+    def _fetch_models_bg(self) -> None:
+        try:
+            log("SeedVR2-Modelle fehlen im Home-Cache — lade sie automatisch "
+                "(Orchestrator, einmalig) …")
+            if ensure_models_cached(self.cfg, log):
+                log("SeedVR2-Modell-Cache bereit — Nodes bekommen sie per rsync.")
+            else:
+                log("Modell-Download unvollständig — nächster Neustart versucht "
+                    "erneut (oder manuell: vhsorch fetch-models).")
+        except Exception as e:  # noqa: BLE001
+            log(f"Auto-Modell-Fetch fehlgeschlagen: {e}")
 
     # -- Command-Queue (idempotente Nudges der TUI) --------------------------
     def _process_commands(self) -> None:

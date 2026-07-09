@@ -256,6 +256,84 @@ class VideosScreen(ModalScreen):
         self.app.pop_screen()
 
 
+class DestroyScreen(ModalScreen):
+    """Zerstören-Auswahl: einzelne Node (Zifferntaste) oder [a] alle."""
+
+    BINDINGS = [
+        Binding("escape,q", "close", "Zurück"),
+        Binding("a", "destroy_all", "Alle zerstören"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="destroybox"):
+            yield Static(id="destroybody")
+
+    def on_mount(self) -> None:
+        self._repaint()
+        self.set_interval(0.5, self._repaint)
+
+    def _snap_nodes(self) -> list:
+        return (self.app.snap or {}).get("nodes", [])
+
+    def _repaint(self) -> None:
+        if not self.is_mounted:
+            return
+        t = Table.grid(padding=(0, 2))
+        t.add_column(justify="right")
+        t.add_column()
+        nodes = self._snap_nodes()
+        if not nodes:
+            t.add_row("", Text("Keine aktiven Nodes.", style="grey62"))
+        for i, n in enumerate(nodes, 1):
+            line = Text()
+            line.append(f"#{n['instance_id']} ", style="bold")
+            line.append(f"{n['gpu_name']} x{n['num_gpus']}  ", style="grey70")
+            line.append(f"{(n['dph'] or 0):.3f} $/h", style="grey62")
+            t.add_row(Text(f"[{i}]", style="cyan"), line)
+        hint = Text("Zifferntaste = einzelne Node · [a] = ALLE · Esc = zurück",
+                    style="grey62")
+        self.query_one("#destroybody", Static).update(
+            Panel(Group(t, Text(""), hint), title="Zerstören (Kostenstopp)",
+                  border_style="red"))
+
+    def _enqueue_destroy(self, node_id: int) -> None:
+        if _is_stale(self.app.snap) or _lane_stalls(self.app.snap):
+            self.app.notify("Scheduler hängt/steht — Destroy bleibt in der "
+                            "Warteschlange. Notfalls CLI: 'vhsorch destroy'.",
+                            severity="warning")
+        self.app.db.add_command("destroy", node_id=node_id)
+
+    def on_key(self, event) -> None:
+        if event.key.isdigit() and event.key != "0":
+            idx = int(event.key) - 1
+            nodes = self._snap_nodes()
+            if 0 <= idx < len(nodes):
+                nid = nodes[idx]["instance_id"]
+                self.app.push_screen(ConfirmScreen(
+                    f"Node #{nid} SOFORT zerstören? (hart, Kostenstopp)",
+                    lambda: (self._enqueue_destroy(nid),
+                             self.app.notify(f"Destroy für #{nid} angestoßen."),
+                             self.app.pop_screen())))
+                event.stop()
+
+    def action_destroy_all(self) -> None:
+        nodes = self._snap_nodes()
+        if not nodes:
+            self.app.notify("Keine Nodes zum Zerstören.")
+            return
+
+        def do_all():
+            for n in nodes:
+                self._enqueue_destroy(n["instance_id"])
+            self.app.notify(f"Destroy für ALLE {len(nodes)} Node(s) angestoßen.")
+            self.app.pop_screen()
+        self.app.push_screen(ConfirmScreen(
+            f"ALLE {len(nodes)} Nodes SOFORT zerstören? (harter Kostenstopp)", do_all))
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
 class AddNodeScreen(ModalScreen):
     """Node dazu: Offers live suchen (Worker-Thread), wählen, buchen."""
 
@@ -574,6 +652,7 @@ class HomeScreen(Screen):
     BINDINGS = [
         Binding("a", "add_node", "Node dazu"),
         Binding("p", "pull_all", "Pull alle"),
+        Binding("x", "destroy", "Zerstören"),
         Binding("v", "videos", "Videos"),
         Binding("f", "finalize", "Finalisieren", show=False),
         Binding("l", "log", "Log"),
@@ -671,8 +750,8 @@ class HomeScreen(Screen):
         parts += [Text(""),
                   Text("Nodes — Zifferntaste öffnet Detail:", style="bold"),
                   ntab, Text(""),
-                  Text("[a] Node dazu   [p] Pull alle   [v] Videos   [f] Finalisieren   "
-                       "[l] Log   [q] Beenden", style="grey62")]
+                  Text("[a] Node dazu   [p] Pull alle   [x] Zerstören   [v] Videos   "
+                       "[f] Finalisieren   [l] Log   [q] Beenden", style="grey62")]
         border = "red" if stale else ("yellow" if stalls else "cyan")
         body.update(Panel(Group(*parts), title="VHS-Upscale-Orchestrator — Der Lauf",
                           border_style=border))
@@ -709,6 +788,9 @@ class HomeScreen(Screen):
                 n += 1
         self.app.notify(f"Pull für {n} Node(s) angestoßen.")
 
+    def action_destroy(self) -> None:
+        self.app.push_screen(DestroyScreen())
+
     def action_videos(self) -> None:
         self.app.push_screen(VideosScreen())
 
@@ -726,7 +808,7 @@ class VhsApp(App):
     CSS = """
     Screen { align: center top; }
     #homebody, #nodebody { width: 100%; }
-    #addbox, #logbox, #vidbox { align: center middle; width: 90%; }
+    #addbox, #logbox, #vidbox, #destroybox { align: center middle; width: 90%; }
     """
     TITLE = "vhsorch"
 

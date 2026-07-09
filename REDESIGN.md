@@ -23,8 +23,10 @@ Neue/geänderte Dateien: `vhsorch/tui.py` (neu, Textual), `vhsorch/scheduler.py`
 > und gibt Auto-Destroy frei). Trade-off: laufen lassen kostet Geld → deshalb sichtbar + expliziter
 > Finalize-Ausweg statt stillem Kill-mit-Retry-Verlust.
 
-Test starten (im laufenden Loop-Container, teilt State über `/state`):
-`docker compose up -d` → dann `docker compose run --rm orchestrator tui` (oder Menüpunkt „TUI").
+Starten: **`./menu.sh`** — stellt den Loop sicher (`docker compose up -d`) und öffnet direkt die TUI;
+mit `q` schließen = zurück in die Shell (kein Bash-Menü mehr). Der Scheduler lädt beim Start die
+**SeedVR2-Modelle automatisch** in den Home-Cache, falls sie fehlen (im Hintergrund; Worker startet
+erst, wenn sie da sind) — `vhsorch fetch-models` ist nur noch optional/manuell.
 
 ---
 

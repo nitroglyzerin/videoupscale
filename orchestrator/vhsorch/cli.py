@@ -172,24 +172,13 @@ def cmd_fetch_models(cfg: Config, args) -> int:
 
     Läuft auf dem gut angebundenen Orchestrator (nicht auf den Nodes). Danach
     pusht der Scheduler die Modelle per rsync auf jede Node (kein HF auf Nodes).
+    Der Scheduler macht das beim Start inzwischen auch automatisch.
     """
-    import os
-    import urllib.request
-    from .config import SEEDVR2_MODEL_FILES
+    from .models import ensure_models_cached
 
-    os.makedirs(cfg.models_dir, exist_ok=True)
-    for name, url in SEEDVR2_MODEL_FILES.items():
-        dst = os.path.join(cfg.models_dir, name)
-        if os.path.isfile(dst) and os.path.getsize(dst) > 10_000_000:
-            print(f"{name}: bereits vorhanden ({os.path.getsize(dst)//1024//1024} MB) — überspringe.")
-            continue
-        print(f"lade {name} …")
-        tmp = dst + ".part"
-        urllib.request.urlretrieve(url, tmp)
-        os.replace(tmp, dst)
-        print(f"  fertig: {os.path.getsize(dst)//1024//1024} MB")
-    print(f"Modell-Cache bereit: {cfg.models_dir}")
-    return 0
+    ok = ensure_models_cached(cfg, log=print)
+    print(f"Modell-Cache {'bereit' if ok else 'UNVOLLSTÄNDIG'}: {cfg.models_dir}")
+    return 0 if ok else 1
 
 
 def cmd_reconcile(cfg: Config, args) -> int:
