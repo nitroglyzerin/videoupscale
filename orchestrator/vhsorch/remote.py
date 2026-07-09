@@ -9,12 +9,13 @@ import subprocess
 import time
 from typing import Optional
 
-# pgrep-Muster mit Bracket-Trick: '[p]rocess\.sh' matcht den echten
-# process.sh-Prozess, aber NICHT die pgrep-Kommandozeile selbst (die den
-# String literal '[p]rocess\.sh' enthält -> kein "process.sh"-Substring).
-# Ohne diesen Trick würde pgrep -f seine eigene Wrapper-Shell finden und
-# fälschlich "Worker läuft" melden.
-_PGREP_WORKER = r"pgrep -f '[p]rocess\.sh'"
+# pgrep-Muster mit Bracket-Trick: matcht den echten Worker über seinen VOLLEN
+# Pfad '/workspace/process.sh', aber NICHT die pgrep-Kommandozeile selbst
+# (die '[/]workspace/...' enthält -> kein '/workspace/...'-Substring). Der volle
+# Pfad ist wichtig: das frühere '[p]rocess\.sh' matchte auch fremde Zeilen wie
+# 'curl .../node/process.sh' (Bootstrap) -> Fehlalarm "Worker läuft" -> der
+# Worker wurde nie (neu) gestartet, obwohl er gar nicht lief.
+_PGREP_WORKER = r"pgrep -f '[/]workspace/process\.sh'"
 
 
 def _ssh_base(key_path: str, port: int, connect_timeout: int = 20,
@@ -325,7 +326,7 @@ class Remote:
     # sind mit @MARKERN getrennt und werden in probe() geparst.
     _PROBE_SNIPPET = r'''
       if [ -x /workspace/process.sh ]; then echo "PROC=1"; else echo "PROC=0"; fi
-      if pgrep -f '[p]rocess\.sh' >/dev/null 2>&1; then echo "WORKER=1"; else echo "WORKER=0"; fi
+      if pgrep -f '[/]workspace/process\.sh' >/dev/null 2>&1; then echo "WORKER=1"; else echo "WORKER=0"; fi
       echo "BOOTSTRAP=$(cat /workspace/bootstrap.status 2>/dev/null | tail -n1)"
       echo "@GPUACT"
       shopt -s nullglob
@@ -466,14 +467,18 @@ class Remote:
             Fehlstart mehr).
         Fortschritt/Fehler landen in /workspace/work/run.log (Monitor tailt es).
         """
-        # IDEMPOTENT: nur starten, wenn NICHT bereits ein process.sh läuft. Ohne
-        # diese Wache würde ein zweiter Aufruf (manueller [w]-Nudge, während der
-        # Worker noch läuft) einen ZWEITEN Worker-Baum aufbauen -> 2 SeedVR2-
-        # Inferenzen pro physischer GPU -> VRAM/cgroup-OOM. Der Bracket-Trick
-        # ([p]rocess) verhindert, dass pgrep sich selbst findet.
-        launch = (f"{_PGREP_WORKER} >/dev/null 2>&1 || "
-                  "{ setsid /workspace/process.sh "
-                  ">>/workspace/work/run.log 2>&1 </dev/null & }")
+        # WICHTIG: /workspace/work ZUERST anlegen — sonst schlägt die '>>run.log'-
+        # Umleitung fehl (Verzeichnis fehlt), process.sh startet NIE und es
+        # entsteht kein run.log (genau der beobachtete Deadlock: Modelle+Clips da,
+        # GPU idle, run.log fehlt). process.sh legt work/ zwar selbst an, kommt
+        # aber nie so weit, wenn die Umleitung schon vorher scheitert.
+        # IDEMPOTENT: nur starten, wenn NICHT bereits ein Worker läuft (sonst
+        # zweiter Worker-Baum -> OOM). Bracket-Trick verhindert Selbsttreffer.
+        launch = (
+            "mkdir -p /workspace/work; "
+            f"if ! {_PGREP_WORKER} >/dev/null 2>&1; then "
+            "setsid /workspace/process.sh >>/workspace/work/run.log 2>&1 </dev/null & "
+            "fi")
         self.exec(launch, timeout=30)
         # Sauber verifizieren: separater pgrep-Aufruf mit Bracket-Trick, dessen
         # eigene Kommandozeile den echten Prozess NICHT vortäuscht.
