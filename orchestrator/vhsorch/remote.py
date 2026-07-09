@@ -312,6 +312,14 @@ class Remote:
         /FAIL: /   { c=$0; sub(/.*FAIL: /,"",c);   last[c]="fail" }
         END { for (k in last) if (last[k]=="fail") print k }
       ' /workspace/work/logs/gpu*.log 2>/dev/null | sort -u || true
+      echo "@TAIL"
+      { echo "── run.log ──"; tail -n 12 /workspace/work/run.log 2>/dev/null;
+        for lf in /workspace/work/logs/gpu*.log; do
+          g=$(basename "$lf" .log)
+          echo "── $g ──"
+          # \r (tqdm-Fortschritt) zu \n machen, Leerzeilen weg, letzte 10 Zeilen.
+          tail -c 2000 "$lf" 2>/dev/null | tr "\r" "\n" | grep -v "^[[:space:]]*$" | tail -n 10
+        done; } 2>/dev/null || true
       echo "@END"
     '''
 
@@ -329,7 +337,7 @@ class Remote:
         empty = {
             "reachable": False, "process_present": False, "worker_running": False,
             "bootstrap_status": "", "gpus_activity": [], "gpu_stats": {},
-            "final": [], "fails": [],
+            "final": [], "fails": [], "log_tail": [],
         }
         res = self.exec(self._PROBE_SNIPPET, timeout=timeout, connect_timeout=connect_timeout)
         if res.returncode != 0:
@@ -340,7 +348,7 @@ class Remote:
         section = "head"
         for raw in res.stdout.splitlines():
             line = raw.rstrip("\n")
-            if line in ("@GPUACT", "@GPUSTATS", "@FINAL", "@FAILS", "@END"):
+            if line in ("@GPUACT", "@GPUSTATS", "@FINAL", "@FAILS", "@TAIL", "@END"):
                 section = line
                 continue
             if section == "head":
@@ -370,6 +378,10 @@ class Remote:
             elif section == "@FAILS":
                 if line.strip():
                     out["fails"].append(line.strip())
+            elif section == "@TAIL":
+                # Roh übernehmen (inkl. Kopfzeilen ── gpuN ──), max. ~80 Zeilen.
+                if len(out["log_tail"]) < 80:
+                    out["log_tail"].append(line)
         out["gpus_activity"].sort(key=lambda t: t[0])
         return out
 

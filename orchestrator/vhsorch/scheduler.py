@@ -685,6 +685,7 @@ class Scheduler:
                     "worker_started": bool(n["worker_started"]),
                 },
                 "bootstrap_status": p.get("bootstrap_status", "") if p else "",
+                "log_tail": p.get("log_tail", []) if p else [],
                 "created_at": n["created_at"],
                 "uptime_h": round((now - (n["created_at"] or now)) / 3600, 2),
                 "cost_accrued": round((n["dph"] or 0.0)

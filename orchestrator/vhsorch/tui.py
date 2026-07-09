@@ -206,6 +206,64 @@ class LogScreen(ModalScreen):
         self.app.pop_screen()
 
 
+class NodeLogScreen(ModalScreen):
+    """Live-Tail der Node-Logs (run.log + gpuN.log) zum Lurken — aus dem Snapshot.
+
+    Kein eigener SSH: die Probe zieht den Tail alle paar Sekunden mit; diese
+    Ansicht liest ihn nur (Refresh ~0,5 s). Zeigt also 'was gerade im aktiven
+    Prozess passiert' mit ein paar Sekunden Verzögerung.
+    """
+
+    BINDINGS = [Binding("escape,l,q", "close", "Zurück")]
+
+    def __init__(self, instance_id: int) -> None:
+        super().__init__()
+        self.instance_id = instance_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="logbox"):
+            yield Static(id="nodelogbody")
+
+    def on_mount(self) -> None:
+        self._repaint()
+        self.set_interval(0.5, self._repaint)
+
+    def _repaint(self) -> None:
+        if not self.is_mounted:
+            return
+        node = None
+        for n in (self.app.snap or {}).get("nodes", []):
+            if n["instance_id"] == self.instance_id:
+                node = n
+                break
+        piv = ((self.app.snap or {}).get("scheduler") or {}).get("probe_interval", 5)
+        if node is None:
+            body = Text("Node ist nicht mehr aktiv.", style="yellow")
+        else:
+            lines = node.get("log_tail") or []
+            if not lines:
+                body = Text("(noch keine Logausgabe — Worker läuft evtl. noch nicht, "
+                            "oder die Probe war noch nicht dran)", style="grey62")
+            else:
+                body = Text()
+                for ln in lines:
+                    if ln.startswith("── "):
+                        style = "bold cyan"
+                    elif "FAIL" in ln or "FEHLER" in ln or "Error" in ln or "error" in ln:
+                        style = "red"
+                    elif "FERTIG" in ln or "START" in ln or "PHASE" in ln:
+                        style = "green"
+                    else:
+                        style = "grey74"
+                    body.append(ln + "\n", style=style)
+        self.query_one("#nodelogbody", Static).update(
+            Panel(body, title=f"Node #{self.instance_id} — Log  (Esc = zurück · "
+                              f"aktualisiert alle ~{piv}s)", border_style="cyan"))
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
 class VideosScreen(ModalScreen):
     """Clip-Liste je Status aus der DB (namentlich), mit Retry-Hinweis."""
 
@@ -501,7 +559,7 @@ class NodeScreen(Screen):
         Binding("u", "cmd_pull", "Pull"),
         Binding("d", "cmd_drain", "Drain"),
         Binding("x", "cmd_destroy", "Destroy"),
-        Binding("l", "log", "Log"),
+        Binding("l", "node_log", "Node-Log"),
     ]
 
     def __init__(self, instance_id: int) -> None:
@@ -597,7 +655,7 @@ class NodeScreen(Screen):
                          "[w] Worker neu starten.", style="bold red")
 
         actions = Text("[b] Bootstrap  [m] Modelle  [w] Worker  [u] Pull  "
-                       "[d] Drain  [x] Destroy  [l] Log  [Esc] zurück", style="grey62")
+                       "[d] Drain  [x] Destroy  [l] Node-Log  [Esc] zurück", style="grey62")
 
         parts = [head, Text(""), setup, Text(""), gtab, clip_line]
         if alarm:
@@ -638,8 +696,8 @@ class NodeScreen(Screen):
             f"Node #{self.instance_id} SOFORT zerstören? (Kostenstopp, harte Aktion)",
             lambda: self._enqueue("destroy", "Destroy")))
 
-    def action_log(self) -> None:
-        self.app.push_screen(LogScreen())
+    def action_node_log(self) -> None:
+        self.app.push_screen(NodeLogScreen(self.instance_id))
 
     def action_back(self) -> None:
         self.app.pop_screen()
