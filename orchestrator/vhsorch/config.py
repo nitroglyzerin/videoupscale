@@ -130,10 +130,12 @@ class Config:
             heavy_workers=int(os.environ.get("HEAVY_WORKERS", "4")),
             model_node_dl_timeout=int(os.environ.get("MODEL_NODE_DL_TIMEOUT", "600")),
             min_ram_per_gpu_gb=int(os.environ.get("MIN_RAM_PER_GPU_GB", "96")),
-            # Warmup (Stagger + erster torch.compile) darf NICHT als wedged
-            # gelten — daher großzügig. Ein echter Wedge ist danach eindeutig:
-            # process.sh lebt, aber 0 GPU hat je einen Clip geclaimt.
-            worker_wedge_grace=int(os.environ.get("WORKER_WEDGE_GRACE", "240")),
+            # GPU 0 hat Stagger-Delay 0 und claimt bei gesundem Worker binnen
+            # ~IDLE_SLEEP (8 s) einen Clip -> busy=1. torch.compile läuft ERST
+            # NACH dem Claim (also unter busy=1) und zählt daher NICHT als
+            # wedged. 0 GPU busy trotz Backlog ist somit schon nach ~1 min echt
+            # festgefahren; 90 s deckt Startup+Stagger+Probe-Staleness ab.
+            worker_wedge_grace=int(os.environ.get("WORKER_WEDGE_GRACE", "90")),
             worker_wedge_max_restarts=int(os.environ.get("WORKER_WEDGE_MAX_RESTARTS", "3")),
             cost_rate_x=float(os.environ.get("COST_RATE_X", "0.01")),
             gpu_cost_factors=_parse_gpu_factors(os.environ.get("GPU_COST_FACTORS", "")),

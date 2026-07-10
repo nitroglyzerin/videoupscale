@@ -127,9 +127,12 @@ class Scheduler:
         # Worker-Supervisor: erkennt wedged Worker und startet sie automatisch neu.
         # _wedge_since:    iid -> Wallclock, seit wann durchgehend wedged (None=nicht).
         # _wedge_restarts: iid -> (Anzahl Auto-Neustarts, Zeit des letzten).
-        # Beide nur aus dem Heavy-Pool (_run_service, je Node single-flight) berührt.
+        # _wedge_finals:   iid -> zuletzt gesehene Anzahl fertiger Clips auf der
+        #                  Node (Fortschritts-Signal; wächst sie -> Budget reset).
+        # Alle nur aus dem Heavy-Pool (_run_service, je Node single-flight) berührt.
         self._wedge_since: dict[int, float] = {}
         self._wedge_restarts: dict[int, tuple[int, float]] = {}
+        self._wedge_finals: dict[int, int] = {}
 
         # Heartbeat-Zeitstempel (Wallclock) für Stale-Erkennung in der TUI.
         self._started_wall = time.time()
@@ -598,13 +601,18 @@ class Scheduler:
 
         Zwei Schutzmechanismen gegen Fehl-/Endlos-Restarts:
           * GRACE-Fenster: der Zustand muss `worker_wedge_grace` Sekunden am
-            Stück anhalten. Deckt den legitimen Warmup ab (Stagger-Start +
-            erster torch.compile), in dem noch keine GPU busy ist.
+            Stück anhalten (Startup + Stagger + Probe-Staleness).
           * BACKOFF-Cap: nach jedem Auto-Neustart wird die Grace-Uhr neu
             gestartet (Warmup des frischen Workers), und nach
-            `worker_wedge_max_restarts` Versuchen gibt der Supervisor auf
-            (bleibt beim TUI-Alarm -> Mensch muss ran, kein Geld-verbrennendes
-            Restart-Karussell bei wiederkehrendem OOM).
+            `worker_wedge_max_restarts` Versuchen OHNE echten Fortschritt gibt
+            der Supervisor auf (bleibt beim TUI-Alarm -> Mensch muss ran, kein
+            Geld-verbrennendes Restart-Karussell bei wiederkehrendem OOM).
+
+        WICHTIG: Das Restart-Budget wird NUR bei echtem Fortschritt (ein Clip
+        wird auf der Node fertig) zurückgesetzt — NICHT schon bei busy>0. Ein
+        Worker, der einen Clip greift, kurz kompiliert (busy=1) und dann per OOM
+        stirbt, war „busy", ohne je fertig zu werden; würde das den Zähler
+        resetten, griffe der Cap nie und die OOM-Schleife liefe endlos.
 
         Läuft im Heavy-Pool, je Node single-flight -> die _wedge_*-Dicts hat pro
         iid nie mehr als ein Thread in der Hand.
@@ -619,16 +627,25 @@ class Scheduler:
             self._wedge_since.pop(iid, None)
             return
 
+        # Fortschritts-Signal: fertige Clips auf der Node. Wächst die Zahl seit
+        # der letzten Beobachtung, hat der Worker echte Arbeit vollendet ->
+        # Restart-Budget zurücksetzen (ein sich erholender Node bekommt frische
+        # Versuche). Der Erst-Eintrag (prev None) setzt nur den Startwert.
+        finals = {os.path.splitext(f)[0] for f in p.get("final", [])}
+        prev_finals = self._wedge_finals.get(iid)
+        self._wedge_finals[iid] = len(finals)
+        if prev_finals is not None and len(finals) > prev_finals:
+            self._wedge_restarts.pop(iid, None)
+
         busy = sum(1 for t in p.get("gpus_activity", [])
                    if t[1] == "busy" and t[2])
         if busy > 0:
-            # Gesund: eine GPU arbeitet -> Uhr UND Versuchszähler zurücksetzen,
-            # damit ein späterer erneuter Wedge wieder das volle Budget bekommt.
+            # Aktuell nicht wedged (eine GPU arbeitet) -> nur die Wedge-Uhr
+            # löschen. Das Restart-Budget NICHT (siehe Docstring: sonst kein Cap
+            # bei OOM-Schleife) — das reset ausschließlich der Fortschritt oben.
             self._wedge_since.pop(iid, None)
-            self._wedge_restarts.pop(iid, None)
             return
 
-        finals = {os.path.splitext(f)[0] for f in p.get("final", [])}
         remaining = [c for c in self.db.clips_for_node(iid, status="uploaded")
                      if os.path.splitext(c["name"])[0] not in finals]
         if not remaining:

@@ -465,24 +465,32 @@ class Remote:
 
         Bewusst OHNE tmux — unabhängig von Vasts interaktivem Auto-tmux und
         immun gegen still fehlschlagende Session-Starts.
-          * idempotent: läuft der Worker schon, passiert nichts (exit 0),
+          * idempotent: läuft der Worker schon (separater worker_running()-Check),
+            passiert nichts,
           * verifiziert: nach dem Start wird 1 s gewartet und per pgrep geprüft,
             ob der Prozess wirklich lebt -> sonst returncode != 0 (kein stiller
             Fehlstart mehr).
         Fortschritt/Fehler landen in /workspace/work/run.log (Monitor tailt es).
         """
+        # IDEMPOTENZ-CHECK als EIGENER Aufruf — NICHT inline im Launch-Kommando!
+        # Ein 'if ! pgrep -f "[/]workspace/process\.sh"; then setsid
+        # /workspace/process.sh ...' matcht sich SELBST: das ganze Kommando läuft
+        # als `bash -c '<launch>'`, dessen Kommandozeile den LITERALEN Pfad
+        # '/workspace/process.sh' (aus dem setsid-Teil) enthält. Der pgrep findet
+        # diese Elternshell -> 'if !' ist falsch -> setsid läuft NIE (kein
+        # run.log, kein Worker — exakt der beobachtete Fehler). Der Bracket-Trick
+        # schützt nur den pgrep-Aufruf selbst, nicht das daneben stehende setsid.
+        # worker_running() dagegen enthält den Pfad NUR gebracketed -> kein
+        # Selbsttreffer.
+        if self.worker_running():
+            return True
         # WICHTIG: /workspace/work ZUERST anlegen — sonst schlägt die '>>run.log'-
-        # Umleitung fehl (Verzeichnis fehlt), process.sh startet NIE und es
-        # entsteht kein run.log (genau der beobachtete Deadlock: Modelle+Clips da,
-        # GPU idle, run.log fehlt). process.sh legt work/ zwar selbst an, kommt
-        # aber nie so weit, wenn die Umleitung schon vorher scheitert.
-        # IDEMPOTENT: nur starten, wenn NICHT bereits ein Worker läuft (sonst
-        # zweiter Worker-Baum -> OOM). Bracket-Trick verhindert Selbsttreffer.
+        # Umleitung fehl (Verzeichnis fehlt). KEIN Inline-pgrep-Guard mehr (s.o.);
+        # einen Doppelstart verhindert der flock-Single-Instance-Guard IN
+        # process.sh (zweiter Start beendet sich sofort mit exit 0).
         launch = (
             "mkdir -p /workspace/work; "
-            f"if ! {_PGREP_WORKER} >/dev/null 2>&1; then "
-            "setsid /workspace/process.sh >>/workspace/work/run.log 2>&1 </dev/null & "
-            "fi")
+            "setsid /workspace/process.sh >>/workspace/work/run.log 2>&1 </dev/null &")
         self.exec(launch, timeout=30)
         # Sauber verifizieren: separater pgrep-Aufruf mit Bracket-Trick, dessen
         # eigene Kommandozeile den echten Prozess NICHT vortäuscht.
