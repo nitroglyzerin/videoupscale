@@ -712,8 +712,22 @@ class NodeScreen(Screen):
 
         alarm = None
         if n.get("idle_with_backlog"):
-            alarm = Text("⚠ ready, aber keine GPU aktiv trotz Backlog — Worker gecrasht? "
-                         "[w] Worker neu starten.", style="bold red")
+            restarts = n.get("wedge_restarts", 0)
+            cap = n.get("wedge_cap", 0)
+            if restarts >= cap > 0:
+                # Supervisor hat sein Budget aufgebraucht -> Mensch muss ran.
+                alarm = Text(f"⚠ Worker wedged — {restarts} Auto-Neustarts erfolglos "
+                             f"(Cap {cap}). Node prüfen ([l] Log, [s] SSH) oder "
+                             f"[w] erzwingen / [x] Destroy.", style="bold red")
+            elif restarts > 0:
+                # Supervisor greift bereits ein.
+                alarm = Text(f"⚠ keine GPU aktiv trotz Backlog — Supervisor startet neu "
+                             f"(Versuch {restarts}/{cap}). Ggf. [w] sofort neu starten.",
+                             style="bold yellow")
+            else:
+                alarm = Text("⚠ ready, aber keine GPU aktiv trotz Backlog — Worker gecrasht? "
+                             "Supervisor greift nach kurzer Frist ein, oder [w] jetzt.",
+                             style="bold red")
 
         actions = Text("[b] Bootstrap  [m] Modelle  [w] Worker  [u] Pull  [d] Drain  "
                        "[x] Destroy  [s] SSH  [l] Node-Log  [Esc] zurück", style="grey62")
@@ -741,7 +755,7 @@ class NodeScreen(Screen):
         self._enqueue("models", "Modell-Push")
 
     def action_cmd_worker(self) -> None:
-        self._enqueue("worker", "Worker-Start")
+        self._enqueue("worker", "Worker-Neustart")
 
     def action_cmd_pull(self) -> None:
         self._enqueue("pull", "Pull")

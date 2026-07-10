@@ -124,6 +124,13 @@ class Scheduler:
         self._probes: dict[int, dict] = {}     # iid -> {"data": <probe>, "at": ts}
         self._mono: dict[tuple[int, int], tuple[str, int]] = {}  # (iid,gpu) -> (clip, max_pct)
 
+        # Worker-Supervisor: erkennt wedged Worker und startet sie automatisch neu.
+        # _wedge_since:    iid -> Wallclock, seit wann durchgehend wedged (None=nicht).
+        # _wedge_restarts: iid -> (Anzahl Auto-Neustarts, Zeit des letzten).
+        # Beide nur aus dem Heavy-Pool (_run_service, je Node single-flight) berührt.
+        self._wedge_since: dict[int, float] = {}
+        self._wedge_restarts: dict[int, tuple[int, float]] = {}
+
         # Heartbeat-Zeitstempel (Wallclock) für Stale-Erkennung in der TUI.
         self._started_wall = time.time()
         self._last_work_wall = 0.0
@@ -293,18 +300,19 @@ class Scheduler:
                     cid, "done" if ok else "failed",
                     "Modelle bereitgestellt" if ok else "Bereitstellen fehlgeschlagen")
             elif action == "worker":
-                # IDEMPOTENT: läuft der Worker schon, NICHT erneut starten (sonst
-                # zweiter Worker-Baum -> OOM). remote.start_worker ist zwar jetzt
-                # selbst pgrep-gewacht, aber wir melden hier den echten Zustand.
-                if r.worker_running():
-                    self.db.set_command_status(cid, "done", "Worker läuft bereits")
-                else:
-                    ok = r.start_worker()
-                    if ok:
-                        self.db.update_node(node_id, worker_started=1)
-                    self.db.set_command_status(
-                        cid, "done" if ok else "failed",
-                        "Worker gestartet" if ok else "Worker-Start fehlgeschlagen")
+                # Manueller [w]-Anstoß = HARTER Neustart (Escape-Hatch). Der
+                # Auto-Service-Loop startet den Worker idempotent; der Mensch
+                # drückt [w] hingegen genau dann, wenn der Worker WEDGED ist —
+                # process.sh lebt laut pgrep, aber keine GPU arbeitet (siehe
+                # Alarm „Worker gecrasht? [w] neu starten"). Ein idempotenter
+                # Start käme daran nie vorbei, weil er den toten Baum als
+                # „läuft" sieht. Also: alten Baum killen, frisch starten.
+                ok = r.restart_worker()
+                if ok:
+                    self.db.update_node(node_id, worker_started=1)
+                self.db.set_command_status(
+                    cid, "done" if ok else "failed",
+                    "Worker neu gestartet" if ok else "Worker-Neustart fehlgeschlagen")
             elif action == "pull":
                 self._pull_and_mark(node)
                 self.db.set_command_status(cid, "done", "Ergebnisse gepullt")
@@ -542,7 +550,13 @@ class Scheduler:
                 if not self._provide_models(node):
                     return  # Modelle noch nicht da -> Worker wartet.
 
-            # 3) Worker früh starten (idempotent).
+            # 3) Supervisor: einen WEDGED Worker (lebt, aber 0 GPU aktiv trotz
+            #    echter Restarbeit) automatisch neu starten. Muss VOR dem
+            #    idempotenten Start laufen — der käme an einem wedged Prozess
+            #    nie vorbei (er sieht ihn „laufen").
+            self._supervise_worker(iid, r)
+
+            # 4) Worker früh starten (idempotent).
             if not r.worker_running():
                 if r.start_worker():
                     self.db.update_node(iid, worker_started=1)
@@ -573,6 +587,88 @@ class Scheduler:
             log(f"Node {iid}: Service-Fehler: {e}")
         finally:
             self._release(iid)
+
+    def _supervise_worker(self, iid: int, r) -> None:
+        """Erkennt einen WEDGED Worker und startet ihn automatisch neu.
+
+        Wedged = process.sh lebt (worker_running), aber KEINE GPU hat einen Clip
+        geclaimt, obwohl echte Restarbeit ansteht (ein hochgeladener Clip, der
+        auf der Node noch NICHT fertig ist — nicht bloß Pull-Rückstand). Genau
+        die Lage aus dem TUI-Alarm „Worker gecrasht?".
+
+        Zwei Schutzmechanismen gegen Fehl-/Endlos-Restarts:
+          * GRACE-Fenster: der Zustand muss `worker_wedge_grace` Sekunden am
+            Stück anhalten. Deckt den legitimen Warmup ab (Stagger-Start +
+            erster torch.compile), in dem noch keine GPU busy ist.
+          * BACKOFF-Cap: nach jedem Auto-Neustart wird die Grace-Uhr neu
+            gestartet (Warmup des frischen Workers), und nach
+            `worker_wedge_max_restarts` Versuchen gibt der Supervisor auf
+            (bleibt beim TUI-Alarm -> Mensch muss ran, kein Geld-verbrennendes
+            Restart-Karussell bei wiederkehrendem OOM).
+
+        Läuft im Heavy-Pool, je Node single-flight -> die _wedge_*-Dicts hat pro
+        iid nie mehr als ein Thread in der Hand.
+        """
+        pc = self._probes.get(iid)
+        p = pc["data"] if pc else None
+        now = time.time()
+
+        if not (p and p.get("reachable") and p.get("worker_running")):
+            # Kein lebender Worker (oder blind) -> nichts zu überwachen; der
+            # idempotente Start (Schritt 4) kümmert sich ums (Neu-)Anlaufen.
+            self._wedge_since.pop(iid, None)
+            return
+
+        busy = sum(1 for t in p.get("gpus_activity", [])
+                   if t[1] == "busy" and t[2])
+        if busy > 0:
+            # Gesund: eine GPU arbeitet -> Uhr UND Versuchszähler zurücksetzen,
+            # damit ein späterer erneuter Wedge wieder das volle Budget bekommt.
+            self._wedge_since.pop(iid, None)
+            self._wedge_restarts.pop(iid, None)
+            return
+
+        finals = {os.path.splitext(f)[0] for f in p.get("final", [])}
+        remaining = [c for c in self.db.clips_for_node(iid, status="uploaded")
+                     if os.path.splitext(c["name"])[0] not in finals]
+        if not remaining:
+            # 0 GPU aktiv, aber auch keine Restarbeit (alles fertig, nur Pull
+            # offen) -> kein Wedge.
+            self._wedge_since.pop(iid, None)
+            return
+
+        grace = self.cfg.worker_wedge_grace
+        count, last_restart = self._wedge_restarts.get(iid, (0, 0.0))
+
+        # Frisch neu gestarteter Worker: Warmup abwarten, nicht sofort re-werten.
+        if now - last_restart < grace:
+            self._wedge_since.pop(iid, None)
+            return
+
+        since = self._wedge_since.get(iid)
+        if since is None:
+            self._wedge_since[iid] = now
+            return
+        if now - since < grace:
+            return  # noch im Grace-Fenster -> abwarten
+
+        if count >= self.cfg.worker_wedge_max_restarts:
+            # Cap erreicht: nicht weiter neu starten (TUI-Alarm bleibt sichtbar).
+            return
+
+        log(f"Node {iid}: Worker seit {int(now - since)}s wedged "
+            f"(0 GPU aktiv, {len(remaining)} Clip(s) offen) — Auto-Neustart "
+            f"#{count + 1}/{self.cfg.worker_wedge_max_restarts}.")
+        try:
+            if r.restart_worker():
+                self.db.update_node(iid, worker_started=1)
+                log(f"Node {iid}: Worker neu gestartet (Supervisor).")
+            else:
+                log(f"Node {iid}: Supervisor-Neustart meldete Fehlstart.")
+        finally:
+            # Zähler hoch, Grace-Uhr zurücksetzen -> frischer Warmup-Kredit.
+            self._wedge_restarts[iid] = (count + 1, now)
+            self._wedge_since.pop(iid, None)
 
     def _provide_models(self, node) -> bool:
         """Stellt die SeedVR2-Modelle auf der Node bereit. True bei Erfolg.
@@ -846,6 +942,10 @@ class Scheduler:
                 "idle_with_backlog": bool(
                     n["status"] == "ready" and busy_gpus == 0
                     and (ncounts.get("uploaded", 0) > 0)),
+                # Worker-Supervisor: wie oft schon automatisch neu gestartet und
+                # ob das Restart-Budget erschöpft ist (dann muss ein Mensch ran).
+                "wedge_restarts": self._wedge_restarts.get(iid, (0, 0.0))[0],
+                "wedge_cap": self.cfg.worker_wedge_max_restarts,
             })
 
         return {

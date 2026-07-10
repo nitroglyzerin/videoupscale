@@ -488,3 +488,29 @@ class Remote:
         # eigene Kommandozeile den echten Prozess NICHT vortäuscht.
         time.sleep(1.5)
         return self.worker_running()
+
+    def stop_worker(self) -> None:
+        """Beendet den kompletten process.sh-Baum HART (best effort).
+
+        Nötig, wenn der Worker WEDGED ist: process.sh lebt laut pgrep noch
+        (worker_running()=True), aber keine GPU arbeitet — der idempotente
+        start_worker() würde ihn dann NIE ersetzen (er sieht ihn ja „laufen").
+        Erst TERM (Chance auf sauberes Beenden), nach 2 s KILL. Auch die
+        Inferenz-Kinder (python3 inference_cli.py) werden mitgenommen, sonst
+        halten sie VRAM und die neu gestarteten Worker laufen ins OOM. Der
+        flock-Lock löst sich mit dem Tod des Halters von selbst; die Lock-Datei
+        entfernen wir zusätzlich, damit kein verwaister Zustand zurückbleibt."""
+        self.exec(
+            "pkill -TERM -f '[/]workspace/process\\.sh' 2>/dev/null || true; "
+            "sleep 2; "
+            "pkill -KILL -f '[/]workspace/process\\.sh' 2>/dev/null || true; "
+            "pkill -KILL -f '[i]nference_cli\\.py' 2>/dev/null || true; "
+            "rm -f /workspace/.process.lock 2>/dev/null || true",
+            timeout=30)
+
+    def restart_worker(self) -> bool:
+        """Harter Neustart: einen (evtl. wedged) Worker killen, dann frisch
+        starten. Escape-Hatch für den manuellen [w]-Knopf — der idempotente
+        start_worker() allein kommt an einem wedged Prozess nicht vorbei."""
+        self.stop_worker()
+        return self.start_worker()

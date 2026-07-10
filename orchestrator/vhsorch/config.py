@@ -72,6 +72,8 @@ class Config:
     heavy_workers: int    # parallele Slots für lange Transfers (push_models/push/pull)
     model_node_dl_timeout: int  # max. Sekunden je Modelldatei für den Node-Selbst-Download
     min_ram_per_gpu_gb: int     # Mindest-Host-RAM je GPU beim Buchen (gegen VAE-Decode-OOM)
+    worker_wedge_grace: int     # Sek. „wedged" (Worker lebt, 0 GPU aktiv, Restarbeit) bis Auto-Neustart
+    worker_wedge_max_restarts: int  # max. Auto-Neustarts je Node, dann nur noch Alarm (Mensch ran)
     # Kostenmodell (Video-/Kostenübersicht)
     cost_rate_x: float
     gpu_cost_factors: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_GPU_FACTORS))
@@ -128,6 +130,11 @@ class Config:
             heavy_workers=int(os.environ.get("HEAVY_WORKERS", "4")),
             model_node_dl_timeout=int(os.environ.get("MODEL_NODE_DL_TIMEOUT", "600")),
             min_ram_per_gpu_gb=int(os.environ.get("MIN_RAM_PER_GPU_GB", "96")),
+            # Warmup (Stagger + erster torch.compile) darf NICHT als wedged
+            # gelten — daher großzügig. Ein echter Wedge ist danach eindeutig:
+            # process.sh lebt, aber 0 GPU hat je einen Clip geclaimt.
+            worker_wedge_grace=int(os.environ.get("WORKER_WEDGE_GRACE", "240")),
+            worker_wedge_max_restarts=int(os.environ.get("WORKER_WEDGE_MAX_RESTARTS", "3")),
             cost_rate_x=float(os.environ.get("COST_RATE_X", "0.01")),
             gpu_cost_factors=_parse_gpu_factors(os.environ.get("GPU_COST_FACTORS", "")),
             gpu_factor_default=float(os.environ.get("GPU_FACTOR_DEFAULT", "1.0")),
