@@ -32,17 +32,22 @@ def _bootstrap_onstart(cfg: Config) -> str:
 def cmd_plan(cfg: Config, args) -> int:
     cfg.require_api_key()
     vast = VastClient(cfg.vast_api_key)
-    offers = vast.search_offers(disk_gb=cfg.vast_disk_gb, min_gpus=args.min_gpus)
+    offers = vast.search_offers(disk_gb=cfg.vast_disk_gb, min_gpus=args.min_gpus,
+                                min_ram_per_gpu_gb=cfg.min_ram_per_gpu_gb)
     if not offers:
         print("Keine passenden Offers gefunden (Filter: RTX 4090/5090, verified, "
-              f">= {args.min_gpus} GPUs, reliability >= 99.5%, disk >= {cfg.vast_disk_gb} GB).")
+              f">= {args.min_gpus} GPUs, reliability >= 99.5%, disk >= {cfg.vast_disk_gb} GB, "
+              f">= {cfg.min_ram_per_gpu_gb} GB RAM/GPU). "
+              f"Ggf. MIN_RAM_PER_GPU_GB senken.")
         return 1
     top = offers[: args.top]
-    print(f"\nTop-{len(top)} Offers (sortiert nach DLPerf/$/h):\n")
-    print(f"{'#':>2}  {'OFFER-ID':>9}  {'GPU':<12} {'GPUs':>4}  {'$/h':>7}  "
+    print(f"\nTop-{len(top)} Offers (sortiert nach DLPerf/$/h · Filter RAM/GPU >= "
+          f"{cfg.min_ram_per_gpu_gb} GB):\n")
+    print(f"{'#':>2}  {'OFFER-ID':>9}  {'GPU':<12} {'GPUs':>4}  {'RAM/GPU':>8}  {'$/h':>7}  "
           f"{'DLPerf/$':>9}  {'Rel.':>6}  {'Disk':>6}  Ort")
     for i, o in enumerate(top, 1):
-        print(f"{i:>2}  {o.id:>9}  {o.gpu_name:<12} {o.num_gpus:>4}  {o.dph_total:>7.3f}  "
+        print(f"{i:>2}  {o.id:>9}  {o.gpu_name:<12} {o.num_gpus:>4}  "
+              f"{o.ram_per_gpu_gb:>6.0f}G  {o.dph_total:>7.3f}  "
               f"{o.dlperf_per_dph:>9.1f}  {o.reliability*100:>5.1f}%  "
               f"{o.disk_space:>5.0f}G  {o.geolocation}")
     print("\nZum Buchen:  vhsorch book <OFFER-ID>\n")

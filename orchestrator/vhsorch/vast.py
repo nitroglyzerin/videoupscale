@@ -42,6 +42,12 @@ class Offer:
     disk_space: float          # GB verfügbar
     cuda_max_good: float
     geolocation: str
+    cpu_ram: float             # System-RAM gesamt in MB
+
+    @property
+    def ram_per_gpu_gb(self) -> float:
+        """Host-RAM je GPU in GB — entscheidend gegen den VAE-Decode-OOM."""
+        return (self.cpu_ram / 1024.0) / max(1, self.num_gpus)
 
     @classmethod
     def from_api(cls, d: dict[str, Any]) -> "Offer":
@@ -56,6 +62,7 @@ class Offer:
             disk_space=float(d.get("disk_space", 0.0)),
             cuda_max_good=float(d.get("cuda_max_good", 0.0)),
             geolocation=d.get("geolocation") or "?",
+            cpu_ram=float(d.get("cpu_ram", 0.0)),
         )
 
 
@@ -117,12 +124,14 @@ class VastClient:
     # --- Suche ---------------------------------------------------------------
     def search_offers(self, disk_gb: int, min_gpus: int = 4,
                       min_reliability: float = 0.995,
-                      gpu_names: Optional[list[str]] = None) -> list[Offer]:
+                      gpu_names: Optional[list[str]] = None,
+                      min_ram_per_gpu_gb: int = 0) -> list[Offer]:
         """Sucht Offers mit den HARTEN Filtern aus der Anforderung.
 
         Filter: GPU-Typ (Default RTX 4090|5090, über gpu_names einschränkbar),
         verified, rentable, num_gpus>=min_gpus, reliability>=min_reliability,
-        disk_space>=disk_gb. Sortiert nach Preis-Leistung (dlperf_per_dphtotal).
+        disk_space>=disk_gb, Host-RAM/GPU>=min_ram_per_gpu_gb. Sortiert nach
+        Preis-Leistung (dlperf_per_dphtotal).
         """
         allowed = gpu_names or ALLOWED_GPUS
         query = {
@@ -146,6 +155,7 @@ class VastClient:
             if any(g in o.gpu_name for g in allowed)
             and o.num_gpus >= min_gpus
             and o.reliability >= min_reliability
+            and o.ram_per_gpu_gb >= min_ram_per_gpu_gb
         ]
 
     # --- Buchen --------------------------------------------------------------

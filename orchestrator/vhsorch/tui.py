@@ -432,17 +432,20 @@ class AddNodeScreen(ModalScreen):
         Binding("escape,q", "close", "Abbrechen"),
         Binding("g", "cycle_gpus", "min. GPUs"),
         Binding("t", "cycle_type", "GPU-Typ"),
+        Binding("r", "cycle_ram", "RAM/GPU"),
         # Zifferntaste wählt ein Offer — via on_key.
     ]
 
-    # Wählbare Mindest-GPU-Anzahl und GPU-Typ-Filter (None = beide erlaubten).
+    # Wählbare Mindest-GPU-Anzahl, GPU-Typ-Filter, Mindest-RAM/GPU (gegen VAE-OOM).
     _GPU_STEPS = [1, 2, 4, 6, 8]
     _TYPE_OPTS = [("beide", None), ("RTX 5090", ["RTX 5090"]), ("RTX 4090", ["RTX 4090"])]
+    _RAM_STEPS = [0, 48, 64, 96, 128, 192, 256]
 
     def __init__(self, min_gpus: int = 4) -> None:
         super().__init__()
         self._min_gpus = min_gpus if min_gpus in self._GPU_STEPS else 4
         self._type_idx = 0
+        self._ram_idx = 3   # Default 96 GB/GPU; in on_mount an Config angepasst
         self._offers: list = []
         self._loading = True
         self._error: Optional[str] = None
@@ -452,6 +455,10 @@ class AddNodeScreen(ModalScreen):
             yield Static(id="addbody")
 
     def on_mount(self) -> None:
+        # RAM-Filter auf den Config-Wert (nächstliegende Stufe) setzen.
+        want = self.app.cfg.min_ram_per_gpu_gb
+        self._ram_idx = min(range(len(self._RAM_STEPS)),
+                            key=lambda i: abs(self._RAM_STEPS[i] - want))
         self._repaint()
         self._search()
 
@@ -471,6 +478,10 @@ class AddNodeScreen(ModalScreen):
         self._type_idx = (self._type_idx + 1) % len(self._TYPE_OPTS)
         self._restart_search()
 
+    def action_cycle_ram(self) -> None:
+        self._ram_idx = (self._ram_idx + 1) % len(self._RAM_STEPS)
+        self._restart_search()
+
     @work(thread=True, exclusive=True)
     def _search(self) -> None:
         try:
@@ -478,7 +489,8 @@ class AddNodeScreen(ModalScreen):
             vast = VastClient(self.app.cfg.vast_api_key)
             offers = vast.search_offers(disk_gb=self.app.cfg.vast_disk_gb,
                                         min_gpus=self._min_gpus,
-                                        gpu_names=self._TYPE_OPTS[self._type_idx][1])
+                                        gpu_names=self._TYPE_OPTS[self._type_idx][1],
+                                        min_ram_per_gpu_gb=self._RAM_STEPS[self._ram_idx])
             self.app.call_from_thread(self._got_offers, offers[:9], None)
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._got_offers, [], str(e)[:200])
@@ -496,9 +508,12 @@ class AddNodeScreen(ModalScreen):
             return
         body = self.query_one("#addbody", Static)
         typename = self._TYPE_OPTS[self._type_idx][0]
+        ram = self._RAM_STEPS[self._ram_idx]
+        ramtxt = "egal" if ram == 0 else f"≥{ram} GB"
         filt = Text()
-        filt.append(f"Filter: ≥{self._min_gpus} GPUs · {typename}", style="bold")
-        filt.append("   [g] min. GPUs ändern · [t] GPU-Typ ändern", style="grey62")
+        filt.append(f"Filter: ≥{self._min_gpus} GPUs · {typename} · RAM/GPU {ramtxt}",
+                    style="bold")
+        filt.append("   [g] GPUs · [t] Typ · [r] RAM/GPU", style="grey62")
 
         def panel(inner, border="cyan"):
             body.update(Panel(Group(filt, Text(""), inner),
@@ -511,19 +526,20 @@ class AddNodeScreen(ModalScreen):
             panel(Text(f"Fehler: {self._error}", style="red"), border="red")
             return
         if not self._offers:
-            panel(Text("Keine Offers für diesen Filter — [g]/[t] anpassen."),
-                  border="yellow")
+            panel(Text("Keine Offers für diesen Filter — [g]/[t]/[r] anpassen "
+                       "(z. B. RAM/GPU senken)."), border="yellow")
             return
         t = Table(box=None, pad_edge=False)
         t.add_column("#", justify="right")
         t.add_column("GPU")
         t.add_column("GPUs", justify="right")
+        t.add_column("RAM/GPU", justify="right")
         t.add_column("$/h", justify="right")
         t.add_column("DLPerf/$", justify="right")
         t.add_column("Ort")
         for i, o in enumerate(self._offers, 1):
-            t.add_row(str(i), o.gpu_name, str(o.num_gpus), f"{o.dph_total:.3f}",
-                      f"{o.dlperf_per_dph:.0f}", o.geolocation)
+            t.add_row(str(i), o.gpu_name, str(o.num_gpus), f"{o.ram_per_gpu_gb:.0f}G",
+                      f"{o.dph_total:.3f}", f"{o.dlperf_per_dph:.0f}", o.geolocation)
         warn = ""
         q = (self.app.snap or {}).get("queue", {})
         auto = ((self.app.snap or {}).get("scheduler") or {}).get("auto_destroy")
