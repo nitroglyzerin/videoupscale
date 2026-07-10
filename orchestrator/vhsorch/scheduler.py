@@ -52,13 +52,19 @@ _PHASE_RANGE = {"Denoise": (0, 20), "Upscale": (20, 90), "Audio": (90, 100)}
 _PHASE_STEP = {"Denoise": "1/3", "Upscale": "2/3", "Audio": "3/3"}
 
 
-def _upscale_subpct(samp: str, dec: str) -> int:
+# Die drei SeedVR2-Sub-Phasen der Upscale-Stufe (je Clip, in Batches gezählt):
+_UPSCALE_SUBPHASES = ("VAE-Encoding", "Upscaling", "VAE-Decoding")
+
+
+def _upscale_subpct(enc: str, samp: str, dec: str) -> int:
     """Echter Upscale-Fortschritt aus den SeedVR2-BATCH-Zählern (nicht dem
-    irreführenden Per-Batch-tqdm-%). SeedVR2 rechnet je Clip in Batches: erst
-    Sampling ('Upscaling batch N/M'), dann VAE-Decoding ('Decoding batch N/M').
-    Fortschritt = erledigte Batches / (Sampling- + Decoding-Batches), sodass der
-    Balken beim Übergang Sampling->Decoding NICHT bei ~100% klebt, sondern das
-    Decoding als zweite Hälfte weiterzählt. -1 = keine Batch-Info (roher %).
+    irreführenden Per-Batch-tqdm-%). SeedVR2 rechnet je Clip in Batches, in DREI
+    Sub-Phasen nacheinander: VAE-Encoding ('Encoding batch N/M') -> Upscaling
+    ('Upscaling batch N/M') -> VAE-Decoding ('Decoding batch N/M'), jede mit
+    eigener tqdm. Fortschritt = erledigte Batches / (3 × Batches), mit Ordnungs-
+    Inferenz (läuft eine spätere Sub-Phase, sind die früheren fertig). So klebt
+    der Balken nicht bei ~100%, sondern zählt über alle drei Drittel monoton
+    durch. -1 = keine Batch-Info (dann roher tqdm-%).
     """
     def parse(x: str):
         try:
@@ -68,14 +74,24 @@ def _upscale_subpct(samp: str, dec: str) -> int:
         except (ValueError, AttributeError):
             return None
 
-    s = parse(samp)
-    d = parse(dec)
-    if not s and not d:
+    e, s, d = parse(enc), parse(samp), parse(dec)
+    if not (e or s or d):
         return -1
-    s_n, s_m = s if s else (0, (d[1] if d else 1))
-    d_n, d_m = d if d else (0, s_m)          # Decode noch nicht begonnen -> 0/gleich viele
-    total = s_m + d_m
-    return int(round(100 * (s_n + d_n) / total)) if total > 0 else -1
+    # gemeinsame Batchzahl M (Sub-Phasen batchen denselben Clip gleich) — nimm
+    # die größte bekannte, sonst 1.
+    ms = [x[1] for x in (e, s, d) if x]
+    m = max(ms) if ms else 1
+    # erledigte Batches über die drei Drittel, mit Ordnungs-Inferenz:
+    if d:            # im Decoding -> Encoding + Upscaling fertig
+        done = m + m + d[0]
+    elif s:          # im Upscaling  -> Encoding fertig
+        done = m + s[0]
+    elif e:          # im Encoding
+        done = e[0]
+    else:
+        done = 0
+    total = 3 * m
+    return int(round(100 * done / total)) if total > 0 else -1
 
 
 def log(msg: str) -> None:
@@ -355,8 +371,8 @@ class Scheduler:
             if not fails:
                 continue
             finals = {os.path.splitext(f)[0] for f in p.get("final", [])}
-            busy_clips = {clip for (_g, st, clip, _ph, _pct)
-                          in p.get("gpus_activity", []) if st == "busy" and clip}
+            busy_clips = {t[2] for t in p.get("gpus_activity", [])
+                          if t[1] == "busy" and t[2]}
             failset = set(fails) - finals - busy_clips
             if not failset:
                 continue
@@ -697,22 +713,28 @@ class Scheduler:
     # ========================================================================
     #  Snapshot (der einzige Live-Datenkanal der TUI)
     # ========================================================================
-    def _gpu_progress(self, iid: int, gpu: int, state: str, clip: str,
-                      phase: str, pct: str) -> tuple[int, int]:
+    def _gpu_progress(self, iid: int, gpu: int, state: str, clip: str, phase: str,
+                      pct: str, enc: str = "", samp: str = "", dec: str = "") -> tuple[int, int]:
         """Monotoner Fein-% (innerhalb der Phase) + Gesamt-% (über alle Phasen).
 
-        Der rohe tqdm-% springt, weil SeedVR2 mehrere Bars nacheinander ausgibt.
-        Wir klemmen den angezeigten Phasen-% auf monoton pro (Node,GPU,Clip) und
-        rechnen daraus einen ebenfalls monotonen Gesamt-Fortschritt.
+        Bei der Upscale-Phase kommt der Fein-% aus den SeedVR2-BATCH-Zählern der
+        drei Sub-Phasen (VAE-Encoding, Upscaling, VAE-Decoding), NICHT aus dem
+        irreführenden Per-Batch-tqdm-% (der bei jedem Batch auf 100% springt und
+        den Balken bei ~90% festkleben ließ). Andere Phasen nutzen weiter den
+        rohen tqdm-%. Zusätzlich monotone Klemme pro (Node,GPU,Clip).
         """
         key = (iid, gpu)
         if state != "busy" or not clip:
             self._mono.pop(key, None)
             return -1, -1
-        try:
-            pval = int(pct.rstrip("%")) if pct else -1
-        except ValueError:
-            pval = -1
+        pval = -1
+        if phase == "Upscale":
+            pval = _upscale_subpct(enc, samp, dec)
+        if pval < 0:
+            try:
+                pval = int(pct.rstrip("%")) if pct else -1
+            except ValueError:
+                pval = -1
         prev = self._mono.get(key)
         if prev and prev[0] == clip:
             pval = max(prev[1], pval)          # nie rückwärts innerhalb desselben Clips
@@ -722,7 +744,7 @@ class Scheduler:
         if pval >= 0:
             overall = lo + (hi - lo) * pval / 100.0
         else:
-            overall = lo                        # Phase ohne tqdm -> Phasenstart
+            overall = lo                        # Phase ohne Fortschritt -> Phasenstart
         return pval, int(round(overall))
 
     def _build_snapshot(self) -> dict:
@@ -751,21 +773,31 @@ class Scheduler:
             reachable = bool(p and p.get("reachable"))
             ncounts = by_node.get(iid, {})
 
-            act_by_gpu = {g: (st, clip, ph, pct)
-                          for (g, st, clip, ph, pct) in (p.get("gpus_activity", []) if p else [])}
+            act_by_gpu = {t[0]: t[1:] for t in (p.get("gpus_activity", []) if p else [])}
             stats = p.get("gpu_stats", {}) if p else {}
             finals = {os.path.splitext(f)[0] for f in (p.get("final", []) if p else [])}
 
             ngpu = n["num_gpus"] or (max(act_by_gpu, default=-1) + 1)
             gpus = []
             for g in range(ngpu):
-                st, clip, ph, pct = act_by_gpu.get(g, ("waiting", "", "", ""))
-                fine, overall = self._gpu_progress(iid, g, st, clip, ph, pct)
+                st, clip, ph, pct, enc, samp, dec = act_by_gpu.get(
+                    g, ("waiting", "", "", "", "", "", ""))
+                fine, overall = self._gpu_progress(iid, g, st, clip, ph, pct, enc, samp, dec)
                 util, used, total = stats.get(g, (None, None, None))
+                # Klartext-Batch-Stufe (SeedVR2 zählt in Batches, nicht Frames):
+                # Encoding -> Upscaling -> Decoding, spätere Stufe gewinnt.
+                if dec:
+                    batch = f"Decode {dec}"
+                elif samp:
+                    batch = f"Upscale {samp}"
+                elif enc:
+                    batch = f"Encode {enc}"
+                else:
+                    batch = ""
                 gpus.append({
                     "index": g, "state": st, "clip": clip, "phase": ph,
                     "step": _PHASE_STEP.get(ph, ""),
-                    "pct": fine, "progress": overall,
+                    "pct": fine, "progress": overall, "batch": batch,
                     "util": util, "vram_used_mib": used, "vram_total_mib": total,
                 })
 

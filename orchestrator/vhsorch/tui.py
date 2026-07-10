@@ -91,7 +91,9 @@ _STATUS_BADGE = {
     "draining": ("drainend", "yellow"),
     "destroyed": ("zerstört", "red"),
 }
-_PHASES = [("Denoise", 4), ("Upscale", 12), ("Audio", 3)]
+# (Name, Zellbreite, Sub-Phasen): Upscale ist intern dreigeteilt (VAE-Encoding,
+# Upscaling, VAE-Decoding) -> im Balken durch zwei zarte Trenner angedeutet.
+_PHASES = [("Denoise", 4, 1), ("Upscale", 12, 3), ("Audio", 3, 1)]
 
 
 def _bar(done: int, total: int, width: int = 30) -> Text:
@@ -104,23 +106,30 @@ def _bar(done: int, total: int, width: int = 30) -> Text:
 
 
 def _phase_bar(phase: str, pct: int, progress: int) -> Text:
-    """Segmentierter Phasen-Balken (erledigt=grün, laufend=anteilig, offen=grau)."""
+    """Segmentierter Phasen-Balken (erledigt=grün, laufend=anteilig, offen=grau).
+
+    Phasen mit Sub-Phasen (Upscale=3) bekommen zarte Trenner ('┊', sehr dim),
+    die andeuten, dass der Abschnitt intern noch dreigeteilt ist — nur leicht.
+    """
     names = [p[0] for p in _PHASES]
     cur = names.index(phase) if phase in names else -1
     t = Text()
-    for i, (name, w) in enumerate(_PHASES):
+    for i, (name, w, sub) in enumerate(_PHASES):
         t.append(f"{name} ")
-        if cur >= 0 and i < cur:
-            t.append("█" * w, style="green")
-        elif i == cur:
-            f = max(0, min(w, round(w * pct / 100))) if pct >= 0 else w
-            if pct >= 0:
-                t.append("█" * f, style="yellow")
-                t.append("░" * (w - f), style="grey37")
+        shaded = (i == cur and pct < 0)                     # laufend ohne %-Wert
+        fill = max(0, min(w, round(w * pct / 100))) if (i == cur and pct >= 0) else 0
+        step = (w // sub) if sub > 1 else 0
+        for c in range(w):
+            if step and c > 0 and c % step == 0:
+                t.append("┊", style="grey30")               # zarter Sub-Phasen-Trenner
+            if i < cur:
+                t.append("█", style="green")                # erledigte Phase
+            elif shaded:
+                t.append("▓", style="yellow")               # laufend, %-Wert unbekannt
+            elif i == cur and c < fill:
+                t.append("█", style="yellow")               # laufend, anteilig
             else:
-                t.append("▓" * w, style="yellow")
-        else:
-            t.append("░" * w, style="grey37")
+                t.append("░", style="grey37")               # offen
         t.append("   ")
     if progress >= 0:
         t.append(f" {progress}%", style="bold")
@@ -670,7 +679,8 @@ class NodeScreen(Screen):
                     load = f"{g['util']}% · {(g['vram_used_mib'] or 0)/1024:.1f}/" \
                            f"{(g['vram_total_mib'] or 0)/1024:.0f}G"
                 gtab.add_row(left, Text(load, style="grey62"))
-                gtab.add_row(_phase_bar(g["phase"], g["pct"], g["progress"]), Text(""))
+                gtab.add_row(_phase_bar(g["phase"], g["pct"], g["progress"]),
+                             Text(g.get("batch", ""), style="grey62"))
             elif g["state"] == "idle":
                 gtab.add_row(Text(f"○ GPU {g['index']}  (frei / zwischen Clips)",
                                   style="grey58"), Text(""))
