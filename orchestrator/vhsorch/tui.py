@@ -811,14 +811,22 @@ class NodeScreen(Screen):
                     load = f"{g['util']}% · {(g['vram_used_mib'] or 0)/1024:.1f}/" \
                            f"{(g['vram_total_mib'] or 0)/1024:.0f}G"
                 gtab.add_row(left, Text(load, style="grey62"))
-                # torch.compile/Modell-Init: Worker hat den Clip gegriffen (busy),
-                # aber die Upscale-Phase hat noch KEINEN Batch-Zähler -> der 0-%-
-                # Balken sähe „eingefroren" aus. Klartext-Hinweis statt totem Balken.
-                if g["phase"] == "Upscale" and not g.get("batch"):
-                    gtab.add_row(
-                        Text("  ⏳ torch.compile / Modell-Init "
-                             "(erster Clip: mehrere Minuten) …", style="yellow"),
-                        Text(""))
+                # Modell-Init/torch.compile: busy, aber noch KEIN Batch-Zähler -> der
+                # 0-%-Balken sähe „eingefroren" aus. Kurzes Init (jeder Clip: Modell
+                # laden + warme compile-Guards, Sekunden) ruhig grau; nur ein wirklich
+                # langes Fenster ist der echte Erstlauf-Compile (Minuten) -> gelb.
+                cs = g.get("compile_secs")
+                if cs is not None:
+                    if cs >= 45:
+                        gtab.add_row(
+                            Text(f"  ⏳ torch.compile — Erstlauf, mehrere Minuten "
+                                 f"({cs}s) …", style="yellow"),
+                            Text(""))
+                    else:
+                        gtab.add_row(
+                            Text(f"  … lädt Modell / initialisiert ({cs}s)",
+                                 style="grey58"),
+                            Text(""))
                 else:
                     gtab.add_row(_phase_bar(g["phase"], g["pct"], g["progress"]),
                                  Text(g.get("batch", ""), style="grey62"))

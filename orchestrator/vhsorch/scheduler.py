@@ -134,6 +134,11 @@ class Scheduler:
         # In-Memory-Caches für den Snapshot.
         self._probes: dict[int, dict] = {}     # iid -> {"data": <probe>, "at": ts}
         self._mono: dict[tuple[int, int], tuple[str, int]] = {}  # (iid,gpu) -> (clip, max_pct)
+        # (iid,gpu) -> (clip, ts): seit wann diese GPU an DIESEM Clip „busy, aber
+        # noch kein Batch-Zähler" ist (= Modell-Load/torch.compile). Erlaubt der
+        # TUI, kurzes Pro-Clip-Init (Sekunden) vom echten Erstlauf-Compile
+        # (Minuten) zu unterscheiden, statt bei jedem Clip „mehrere Minuten" zu behaupten.
+        self._compile_since: dict[tuple[int, int], tuple[str, float]] = {}
 
         # Worker-Supervisor: erkennt wedged Worker und startet sie automatisch neu.
         # _wedge_since:    iid -> Wallclock, seit wann durchgehend wedged (None=nicht).
@@ -1072,10 +1077,26 @@ class Scheduler:
                 # Chunk-Kontext davor (CHUNK_SIZE aktiv): "Chunk 3/9 · Encode 42/100"
                 if chk:
                     batch = f"Chunk {chk} · {batch}" if batch else f"Chunk {chk}"
+                # Modell-Load/torch.compile-Dauer: busy in Upscale, aber noch KEIN
+                # Batch-Zähler. Sekunden seit Beginn dieses Zustands -> die TUI trennt
+                # kurzes Pro-Clip-Init von echtem Erstlauf-Compile (statt bei jedem
+                # Clip „mehrere Minuten" zu behaupten). None = kein Init-Zustand.
+                ckey = (iid, g)
+                if st == "busy" and ph == "Upscale" and not batch:
+                    prev = self._compile_since.get(ckey)
+                    if not prev or prev[0] != clip:
+                        self._compile_since[ckey] = (clip, now)
+                        compile_secs = 0
+                    else:
+                        compile_secs = int(now - prev[1])
+                else:
+                    self._compile_since.pop(ckey, None)
+                    compile_secs = None
                 gpus.append({
                     "index": g, "state": st, "clip": clip, "phase": ph,
                     "step": _PHASE_STEP.get(ph, ""),
                     "pct": fine, "progress": overall, "batch": batch,
+                    "compile_secs": compile_secs,
                     "util": util, "vram_used_mib": used, "vram_total_mib": total,
                 })
 
