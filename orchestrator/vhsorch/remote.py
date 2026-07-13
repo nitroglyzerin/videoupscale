@@ -374,6 +374,8 @@ class Remote:
         done; } 2>/dev/null || true
       echo "@MODELS"
       du -sb /workspace/seedvr2/models/SEEDVR2 2>/dev/null | cut -f1 || true
+      echo "@INPUT"
+      ls -1 /workspace/input 2>/dev/null | grep -ic '\.mp4$' || true
       echo "@END"
     '''
 
@@ -392,6 +394,8 @@ class Remote:
             "reachable": False, "process_present": False, "worker_running": False,
             "bootstrap_status": "", "gpus_activity": [], "gpu_stats": {},
             "final": [], "fails": [], "log_tail": [], "models_bytes": 0,
+            # None = unbekannt (Parse fehlgeschlagen) -> Snapshot faellt auf DB zurueck.
+            "input_count": None,
         }
         res = self.exec(self._PROBE_SNIPPET, timeout=timeout, connect_timeout=connect_timeout)
         if res.returncode != 0:
@@ -403,7 +407,7 @@ class Remote:
         for raw in res.stdout.splitlines():
             line = raw.rstrip("\n")
             if line in ("@GPUACT", "@GPUSTATS", "@FINAL", "@FAILS", "@TAIL",
-                        "@MODELS", "@END"):
+                        "@MODELS", "@INPUT", "@END"):
                 section = line
                 continue
             if section == "head":
@@ -442,6 +446,10 @@ class Remote:
                 s = line.strip()
                 if s.isdigit():
                     out["models_bytes"] = int(s)
+            elif section == "@INPUT":
+                s = line.strip()
+                if s.isdigit():
+                    out["input_count"] = int(s)
         out["gpus_activity"].sort(key=lambda t: t[0])
         return out
 

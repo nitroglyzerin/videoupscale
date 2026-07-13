@@ -1070,6 +1070,15 @@ class Scheduler:
                 1 for c in self.db.clips_for_node(iid)
                 if c["status"] not in ("done",) and os.path.splitext(c["name"])[0] in finals
             )
+            # FRISCHE „auf Node"-Zahl aus der Probe (alle 5 s) statt der DB (30-s-Tick):
+            # real im /workspace/input liegende Clips minus die schon fertigen. So
+            # hinkt die Anzeige nicht mehr dem work_tick hinterher. Ohne Probe-Zahl
+            # (None) Fallback auf die DB-'uploaded'-Zahl -> nie schlechter als vorher.
+            input_count = p.get("input_count") if p else None
+            if input_count is not None:
+                on_node_live = max(0, input_count - len(finals))
+            else:
+                on_node_live = ncounts.get("uploaded", 0)
 
             nodes_out.append({
                 "instance_id": iid,
@@ -1098,6 +1107,7 @@ class Scheduler:
                 "clips": {
                     "assigned": ncounts.get("assigned", 0),
                     "uploaded": ncounts.get("uploaded", 0),
+                    "on_node_live": on_node_live,   # frisch aus Probe (s. o.)
                     "done": ncounts.get("done", 0),
                     "failed": ncounts.get("failed", 0),
                     "node_done_pending_pull": node_done_pending,

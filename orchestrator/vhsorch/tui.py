@@ -778,6 +778,16 @@ class NodeScreen(Screen):
         setup.add_row(_flag("Bootstrap [b]", f["bootstrap_started"], boot_extra),
                       _flag("Modelle [m]", f["models_pushed"], models_extra))
         busy_txt, busy_col = _busy_desc(busy)
+        # Sichtbares Warten auf Nachschub: bereit, Worker läuft, keine GPU aktiv und
+        # nichts (mehr) auf der Node -> klaren Grund zeigen statt „bereit"/„wird
+        # bedient". Nicht überschreiben, solange Modelle gepusht/gebootstrapt werden.
+        _cl = n["clips"]
+        _on_node = _cl.get("on_node_live", _cl["uploaded"])
+        if (n["status"] == "ready" and f["worker_running"] and n["busy_gpus"] == 0
+                and _on_node == 0 and _cl["assigned"] == 0
+                and not pushing_models and busy != "bootstrap"):
+            busy_txt, busy_col = ("wartet auf Clips "
+                                  "(Upload läuft / andere Node lädt Modell) …", "yellow")
         setup.add_row(_flag("Worker [w]", f["worker_running"],
                             f"{n['busy_gpus']}/{n['num_gpus']} aktiv" if f["worker_running"] else ""),
                       Text(busy_txt, style=busy_col))
@@ -796,8 +806,17 @@ class NodeScreen(Screen):
                     load = f"{g['util']}% · {(g['vram_used_mib'] or 0)/1024:.1f}/" \
                            f"{(g['vram_total_mib'] or 0)/1024:.0f}G"
                 gtab.add_row(left, Text(load, style="grey62"))
-                gtab.add_row(_phase_bar(g["phase"], g["pct"], g["progress"]),
-                             Text(g.get("batch", ""), style="grey62"))
+                # torch.compile/Modell-Init: Worker hat den Clip gegriffen (busy),
+                # aber die Upscale-Phase hat noch KEINEN Batch-Zähler -> der 0-%-
+                # Balken sähe „eingefroren" aus. Klartext-Hinweis statt totem Balken.
+                if g["phase"] == "Upscale" and not g.get("batch"):
+                    gtab.add_row(
+                        Text("  ⏳ torch.compile / Modell-Init "
+                             "(erster Clip: mehrere Minuten) …", style="yellow"),
+                        Text(""))
+                else:
+                    gtab.add_row(_phase_bar(g["phase"], g["pct"], g["progress"]),
+                                 Text(g.get("batch", ""), style="grey62"))
             elif g["state"] == "idle":
                 gtab.add_row(Text(f"○ GPU {g['index']}  (frei / zwischen Clips)",
                                   style="grey58"), Text(""))
@@ -806,9 +825,12 @@ class NodeScreen(Screen):
                                   style="yellow"), Text(""))
 
         cl = n["clips"]
+        # „auf Node" bevorzugt die frische Probe-Zahl (on_node_live); Fallback auf
+        # die DB-Zahl (uploaded) für ältere Snapshots ohne das Feld.
+        on_node = cl.get("on_node_live", cl["uploaded"])
         clip_line = Text(
             f"Clips: {cl['done']} fertig · {cl['node_done_pending_pull']} Node-fertig "
-            f"(Pull offen) · {cl['uploaded']} auf Node · {cl['assigned']} hochladen · "
+            f"(Pull offen) · {on_node} auf Node · {cl['assigned']} hochladen · "
             f"{cl['failed']} FEHLER", style="grey70")
 
         alarm = None

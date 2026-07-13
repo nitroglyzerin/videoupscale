@@ -39,11 +39,20 @@ VIDEO_BACKEND="ffmpeg"
 ATTENTION_MODE="${ATTENTION_MODE:-sageattn_2}"
 COMPILE_MODE="${COMPILE_MODE:-}"   # leer = SeedVR2-Default (nichts uebergeben)
 
+# RAM-Deckel pro Worker: inference_cli laedt ohne Chunking den KOMPLETTEN Clip
+# in den Host-RAM (~11 MB/Frame bei 720p-Pipeline; 20k-Frame-Clip ≈ 220 GB RSS).
+# Lange Clips reissen so selbst 734-GB-Container (oom_kill trotz RAM-Filter).
+# CHUNK_SIZE begrenzt die gleichzeitig gehaltenen Frames; TEMPORAL_OVERLAP
+# blendet die Chunk-Grenzen. 2500 Frames ≈ 28 GB Puffer/Worker (Schätzwert,
+# ~11 MB/Frame beobachtet). CHUNK_SIZE= (leer) schaltet Chunking ab.
+CHUNK_SIZE="${CHUNK_SIZE-2500}"
+TEMPORAL_OVERLAP="${TEMPORAL_OVERLAP-4}"
+
 # Versatz zwischen dem Start der Worker (Sekunden), damit die initiale
 # torch.compile-Kompilierung nicht gleichzeitig auf allen GPUs losläuft.
 STAGGER_SECONDS="${STAGGER_SECONDS:-30}"
 
-mkdir -p "$WORK_DIR" "$FINAL_DIR" "$TMP_DIR" "$WORK_DIR/logs"
+mkdir -p "$INPUT_DIR" "$WORK_DIR" "$FINAL_DIR" "$TMP_DIR" "$WORK_DIR/logs"
 
 # Single-Instance-Guard: ein zweiter process.sh-Start (z. B. ein versehentlicher
 # zweiter Worker-Nudge, während der erste noch läuft) darf KEINEN zweiten
@@ -152,8 +161,10 @@ process_clip() {
   # Optionale A/B-Flags nur anhaengen, wenn per Env gesetzt (sonst SeedVR2-Default).
   local extra_args=()
   [ -n "$COMPILE_MODE" ] && extra_args+=(--compile_mode "$COMPILE_MODE")
+  [ -n "$CHUNK_SIZE" ] && extra_args+=(--chunk_size "$CHUNK_SIZE")
+  [ -n "$TEMPORAL_OVERLAP" ] && extra_args+=(--temporal_overlap "$TEMPORAL_OVERLAP")
 
-  log "[GPU $gpu] PHASE Upscale: $name  (attn=$ATTENTION_MODE compile_mode=${COMPILE_MODE:-default})"
+  log "[GPU $gpu] PHASE Upscale: $name  (attn=$ATTENTION_MODE compile_mode=${COMPILE_MODE:-default} chunk=${CHUNK_SIZE:-aus})"
   local t_up=$SECONDS
   if ! CUDA_VISIBLE_DEVICES="$gpu" \
        TORCHINDUCTOR_CACHE_DIR="$cache_dir" \
@@ -253,6 +264,7 @@ worker() {
 
   # Endlos abgreifen, bis die Node zerstört wird (Orchestrator bei leerer
   # Queue). Kein Selbst-Exit nötig — die Node wird von außen abgeräumt.
+  local idle_ticks=0 ninput=""
   while true; do
     local worked=0
     # leerzeichen-sicher iterieren (Namen wie "1994-1  T06  V01.mp4").
@@ -273,7 +285,19 @@ worker() {
     done < <(ls -1S "$INPUT_DIR" 2>/dev/null)
 
     # Nichts abgegriffen? kurz warten, dann erneut scannen (Streaming-Intake).
-    [ "$worked" -eq 0 ] && sleep "$IDLE_SLEEP"
+    if [ "$worked" -eq 0 ]; then
+      # Heartbeat, damit „warum tut sich nichts" im Node-Log SICHTBAR ist (statt
+      # stiller Stille = uneinsichtig). Gedrosselt: erste Idle-Runde + danach
+      # ~jede Minute, sonst flutet es run.log/@TAIL.
+      if [ "$idle_ticks" -eq 0 ] || [ $(( idle_ticks % 8 )) -eq 0 ]; then
+        ninput=$(ls -1 "$INPUT_DIR" 2>/dev/null | wc -l | tr -d ' ')
+        log "[GPU $gpu] warte auf Clips — Input: ${ninput} Datei(en), nichts Claimbares (idle) …"
+      fi
+      idle_ticks=$(( idle_ticks + 1 ))
+      sleep "$IDLE_SLEEP"
+    else
+      idle_ticks=0
+    fi
   done
 }
 
