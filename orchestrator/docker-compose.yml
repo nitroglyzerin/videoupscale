@@ -39,7 +39,12 @@
 # ============================================================================
 services:
   orchestrator:
-    build: .
+    build:
+      context: .
+      args:
+        # Branch für die Node-Downloads (bootstrap.sh/process.sh). menu.sh
+        # exportiert den aktuell ausgecheckten Branch; ohne Angabe: main.
+        REPO_BRANCH: ${REPO_BRANCH:-main}
     image: vhsorch:latest
     container_name: vhsorch
     restart: unless-stopped

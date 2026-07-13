@@ -30,8 +30,16 @@ else
   exit 1
 fi
 
-echo "Stelle Orchestrator-Loop sicher (docker compose up -d) …"
-$DC up -d
+# Aktuellen Branch in den Build reichen: Nodes laden bootstrap.sh/process.sh
+# von DIESEM Branch statt hart von main (sonst kommen lokale Änderungen, die
+# nur auf einem Feature-Branch gepusht sind, nie auf den Nodes an).
+REPO_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [ -z "$REPO_BRANCH" ] || [ "$REPO_BRANCH" = "HEAD" ]; then
+  REPO_BRANCH="main"
+fi
+export REPO_BRANCH
+echo "Stelle Orchestrator-Loop sicher (docker compose up -d --build, Branch: $REPO_BRANCH) …"
+$DC up -d --build
 
 # In die TUI wechseln. 'run --rm' allokiert ein TTY (nötig für die interaktive
 # TUI); der Container teilt den State (/state) mit dem Loop-Container, liest also

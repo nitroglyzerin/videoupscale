@@ -119,9 +119,14 @@ class Config:
             done_dir=os.environ.get("DONE_DIR", "/data/done").strip(),
             state_dir=os.environ.get("STATE_DIR", "/state").strip(),
             models_dir=os.environ.get("MODELS_DIR", "/data/models").strip(),
+            # Default folgt dem Branch, aus dem das Orchestrator-Image gebaut
+            # wurde (REPO_BRANCH, siehe Dockerfile/menu.sh). Sonst laden Nodes
+            # process.sh/bootstrap.sh von main, während lokal auf einem
+            # Feature-Branch gearbeitet wird -> "neue Settings kommen nie an".
             repo_raw_url=os.environ.get(
                 "REPO_RAW_URL",
-                "https://raw.githubusercontent.com/nitroglyzerin/videoupscale/main",
+                "https://raw.githubusercontent.com/nitroglyzerin/videoupscale/"
+                + os.environ.get("REPO_BRANCH", "main").strip(),
             ).strip().rstrip("/"),
             poll_interval=int(os.environ.get("POLL_INTERVAL", "30")),
             stable_checks=int(os.environ.get("STABLE_CHECKS", "2")),
