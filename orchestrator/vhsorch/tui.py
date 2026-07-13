@@ -534,6 +534,7 @@ class AddNodeScreen(ModalScreen):
         Binding("g", "cycle_gpus", "min. GPUs"),
         Binding("t", "cycle_type", "GPU-Typ"),
         Binding("r", "cycle_ram", "RAM/GPU"),
+        Binding("a", "refresh", "Aktualisieren"),
         # Zifferntaste wählt ein Offer — via on_key.
     ]
 
@@ -583,6 +584,10 @@ class AddNodeScreen(ModalScreen):
         self._ram_idx = (self._ram_idx + 1) % len(self._RAM_STEPS)
         self._restart_search()
 
+    def action_refresh(self) -> None:
+        # Offers neu laden mit unveränderten Filtern (Vast-Markt dreht schnell).
+        self._restart_search()
+
     @work(thread=True, exclusive=True)
     def _search(self) -> None:
         try:
@@ -614,7 +619,7 @@ class AddNodeScreen(ModalScreen):
         filt = Text()
         filt.append(f"Filter: ≥{self._min_gpus} GPUs · {typename} · RAM/GPU {ramtxt}",
                     style="bold")
-        filt.append("   [g] GPUs · [t] Typ · [r] RAM/GPU", style="grey62")
+        filt.append("   [g] GPUs · [t] Typ · [r] RAM/GPU · [a] neu laden", style="grey62")
 
         def panel(inner, border="cyan"):
             body.update(Panel(Group(filt, Text(""), inner),
@@ -628,7 +633,7 @@ class AddNodeScreen(ModalScreen):
             return
         if not self._offers:
             panel(Text("Keine Offers für diesen Filter — [g]/[t]/[r] anpassen "
-                       "(z. B. RAM/GPU senken)."), border="yellow")
+                       "(z. B. RAM/GPU senken) oder [a] neu laden."), border="yellow")
             return
         t = Table(box=None, pad_edge=False)
         t.add_column("#", justify="right")
