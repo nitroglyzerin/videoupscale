@@ -210,6 +210,131 @@ def render_workmap(cfg: Config, db: DB, vast: VastClient) -> str:
 #  GPU-Faktor kommt aus der Config (relative Rechenleistung pro GPU-Typ),
 #  x = COST_RATE_X ($ je faktor-gewichteter Minute).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+#  Kosten-Statistik: ECHTE $/Frame-Rate aus fertigen Clips + Hochrechnung.
+#
+#  Rate = Summe echter Node-Rechnungen / Summe fertig verarbeiteter Frames.
+#  Das Kostenfenster einer Node läuft von created_at (Buchung) bis destroyed_at
+#  (bzw. jetzt, solange sie lebt) — Bootstrap-, Compile- und Idle-Overhead sind
+#  damit ehrlich eingepreist. Fallback für Alt-Nodes ohne destroyed_at: das
+#  done_at ihres letzten Clips (unterschätzt leicht).
+#  Reine Datenaufbereitung (dict) — gerendert von TUI-CostScreen bzw. CLI.
+# ---------------------------------------------------------------------------
+def cost_stats(cfg: Config, db: DB) -> dict:
+    now = time.time()
+    done_by_node = db.done_frames_by_node()
+
+    node_rows: list[dict] = []
+    total_cost = 0.0     # ALLE Nodes (auch unproduktive) — was wirklich ausgegeben ist
+    prod_cost = 0.0      # nur Nodes mit fertigen Frames — Basis der Rate/Hochrechnung
+    done_frames = 0
+    prod_gpu_hours = 0.0
+    active_gpus = 0
+    for n in db.all_nodes():
+        created = n["created_at"]
+        if not created:
+            continue
+        d = done_by_node.get(n["instance_id"])
+        if n["status"] == "destroyed":
+            end = n["destroyed_at"] or (d["last_done"] if d else None)
+            if end is None:
+                continue  # nie etwas geleistet, Fenster unbekannt -> auslassen
+        else:
+            end = now
+            active_gpus += n["num_gpus"] or 1
+        hours = max(0.0, (end - created) / 3600.0)
+        cost = hours * (n["dph"] or 0.0)
+        frames = d["f"] if d else 0
+        node_rows.append({
+            "iid": n["instance_id"], "gpu": n["gpu_name"], "ngpu": n["num_gpus"] or 1,
+            "dph": n["dph"] or 0.0, "status": n["status"], "hours": hours,
+            "cost": cost, "clips": d["n"] if d else 0, "frames": frames,
+            "rate1k": cost / frames * 1000 if frames else None,
+        })
+        total_cost += cost
+        # Rate/Durchsatz nur aus produktiven Nodes: eine frisch gebuchte Node
+        # (Bootstrap/Compile, noch 0 Frames) würde die Prognose sonst wild
+        # nach oben verzerren. Ihr Overhead zählt rein, SOBALD sie liefert.
+        if frames:
+            prod_cost += cost
+            done_frames += frames
+            prod_gpu_hours += hours * (n["num_gpus"] or 1)
+
+    rate = prod_cost / done_frames if done_frames else None   # $/Frame
+
+    ov = db.frames_overview()
+    open_status = ("pending", "assigned", "uploaded")
+    open_frames = sum(ov.get(s, {}).get("frames", 0) for s in open_status)
+    open_clips = sum(ov.get(s, {}).get("n", 0) for s in open_status)
+    total_frames = sum(v["frames"] for v in ov.values())
+    total_clips = sum(v["n"] for v in ov.values())
+    unknown = sum(v["unknown"] for v in ov.values())
+
+    thruput = done_frames / prod_gpu_hours if prod_gpu_hours else None  # F je GPU-h
+    eta_h = (open_frames / (thruput * active_gpus)
+             if thruput and active_gpus and open_frames else None)
+
+    top = [{"name": r["name"], "status": r["status"], "frames": r["frames"] or 0,
+            "cost": (r["frames"] or 0) * rate if rate else None}
+           for r in db.top_open_clips(15)]
+
+    return {
+        "nodes": node_rows,
+        "total_cost": total_cost, "prod_cost": prod_cost,
+        "done_frames": done_frames, "rate": rate,
+        "total_clips": total_clips, "total_frames": total_frames, "unknown": unknown,
+        "open_clips": open_clips, "open_frames": open_frames,
+        "est_open_cost": open_frames * rate if rate else None,
+        "thruput_gpu_h": thruput, "active_gpus": active_gpus, "eta_h": eta_h,
+        "top_open": top,
+    }
+
+
+def _de(n: int) -> str:
+    """1234567 -> '1.234.567' (deutsche Tausenderpunkte)."""
+    return f"{n:,}".replace(",", ".")
+
+
+def render_costs(cfg: Config, db: DB) -> str:
+    """Konsolen-Ausgabe der Kosten-Statistik (TUI-Pendant: CostScreen, [k])."""
+    s = cost_stats(cfg, db)
+    lines = [f"{_TITLE}== Kosten & Hochrechnung =={_RST}",
+             f"{_DIM}Rate = echte Node-Rechnung ÷ fertig verarbeitete Frames{_RST}"]
+    for n in s["nodes"]:
+        live = "" if n["status"] == "destroyed" else f" {_WARN}(läuft){_RST}"
+        rate = f"{n['rate1k']:.4f} $/1k F" if n["rate1k"] else "—"
+        lines.append(
+            f"  #{n['iid']}  {n['ngpu']}x {n['gpu'] or '?':<10} "
+            f"{n['dph']:.3f} $/h · {n['hours']:5.2f} h = {n['cost']:6.2f} ${live}  "
+            f"{n['clips']:>3} Clips · {_de(n['frames']):>11} F  {_OK}{rate}{_RST}")
+    if s["rate"] is not None:
+        lines.append(f"  {_OK}Rate: {s['prod_cost']:.2f} $ ÷ {_de(s['done_frames'])} Frames "
+                     f"→ {s['rate']*1000:.4f} $/1000 Frames{_RST}"
+                     f"   {_DIM}(gesamt ausgegeben: {s['total_cost']:.2f} $){_RST}")
+    else:
+        lines.append(f"  {_WARN}Noch keine fertigen Clips mit Frame-Messung.{_RST}")
+    lines.append("")
+    lines.append(f"  Bestand: {_de(s['total_clips'])} Videos · "
+                 f"{_de(s['total_frames'])} Frames · offen "
+                 f"{_de(s['open_clips'])} Videos / {_de(s['open_frames'])} Frames")
+    if s["unknown"]:
+        lines.append(f"  {_WARN}⚠ {s['unknown']} Clips ohne Frame-Messung "
+                     f"(Hochrechnung ist Untergrenze){_RST}")
+    if s["est_open_cost"] is not None:
+        eta = ""
+        if s["eta_h"]:
+            eta = (f"   ·   {_de(int(s['thruput_gpu_h']))} F/GPU-h × "
+                   f"{s['active_gpus']} GPUs → ETA ~{s['eta_h']:.1f} h")
+        lines.append(f"  {_OK}Geschätzte Restkosten: {s['est_open_cost']:.2f} ${_RST}{eta}")
+    lines.append("")
+    lines.append(f"  {_DIM}Teuerste offene Videos (kommen zuerst dran):{_RST}")
+    for c in s["top_open"]:
+        cost = f"{c['cost']:6.2f} $" if c["cost"] is not None else "     —"
+        lines.append(f"  {_OK}{cost}{_RST}  {_de(c['frames']):>10} F  "
+                     f"{_DIM}{c['status']:<9}{_RST} {c['name']}")
+    return "\n".join(lines)
+
+
 def render_videos(cfg: Config, db: DB, limit: int | None = None) -> str:
     now = time.time()
     rows = db.clips_with_gpu()

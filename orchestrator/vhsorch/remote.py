@@ -460,6 +460,29 @@ class Remote:
         self.exec(f"rmdir '{claims_dir}/{safe}.lock' 2>/dev/null || true",
                   timeout=15, connect_timeout=8)
 
+    def steal_clip(self, clip_name: str, input_dir: str = "/workspace/input",
+                   claims_dir: str = "/workspace/work/claims") -> bool:
+        """Nimmt der Node einen noch NICHT gestarteten uploaded-Clip weg (Work-
+        Stealing zugunsten eines leeren Nodes).
+
+        Kernstück ist die ATOMARE Arbitrierung über denselben mkdir-Claim-Lock,
+        den auch der Worker in process.sh benutzt:
+          * Gewinnt UNSER `mkdir` den Lock, kann der Worker den Clip nicht mehr
+            greifen (sein eigenes mkdir scheitert) -> wir löschen die Input-Datei,
+            damit er ihn auch bei einem späteren Scan nie sieht -> True.
+          * Scheitert unser `mkdir` (Lock existiert schon), verarbeitet der Worker
+            den Clip GERADE -> wir fassen ihn NICHT an -> False.
+        So kann ein Clip nie auf beiden Nodes gleichzeitig laufen. Der Lock-Name
+        ist '<voller Dateiname>.lock' (identisch zu process.sh)."""
+        safe = clip_name.replace("'", "'\\''")
+        cmd = (
+            f"mkdir -p '{claims_dir}'; "
+            f"if mkdir '{claims_dir}/{safe}.lock' 2>/dev/null; then "
+            f"rm -f '{input_dir}/{safe}'; echo STOLEN; "
+            f"else echo BUSY; fi")
+        res = self.exec(cmd, timeout=30, connect_timeout=10)
+        return res.returncode == 0 and res.stdout.strip().splitlines()[-1:] == ["STOLEN"]
+
     def start_worker(self) -> bool:
         """Startet process.sh detached via setsid (überlebt SSH-Trennung).
 

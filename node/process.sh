@@ -26,8 +26,18 @@ DIT_MODEL="seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 RESOLUTION=720
 BATCH_SIZE=25          # 4n+1-Regel erfüllt (4*6+1 = 25)
 COLOR_CORRECTION="wavelet"
-ATTENTION_MODE="sageattn_2"
 VIDEO_BACKEND="ffmpeg"
+
+# --- A/B-Tunables (Kosten/Frame) --------------------------------------------
+# Per Env ueberschreibbar; Default = getestete Werte, KEINE Abweichung ohne
+# explizite Env-Vorgabe. So laesst sich auf einer Test-Node vergleichen, ohne
+# die "finale" Konfig zu editieren. Immer mit Clip-Abnahme validieren.
+#   ATTENTION_MODE=sageattn_3      -> Blackwell-Attention (5090), potenziell schneller
+#   COMPILE_MODE=max-autotune-no-cudagraphs -> bessere DiT/VAE-Kernel (amortisiert
+#                                    ueber Inductor-Cache); -no-cudagraphs meidet den
+#                                    CUDA-Graph-Pool, der sonst den cgroup-OOM fuettert
+ATTENTION_MODE="${ATTENTION_MODE:-sageattn_2}"
+COMPILE_MODE="${COMPILE_MODE:-}"   # leer = SeedVR2-Default (nichts uebergeben)
 
 # Versatz zwischen dem Start der Worker (Sekunden), damit die initiale
 # torch.compile-Kompilierung nicht gleichzeitig auf allen GPUs losläuft.
@@ -112,6 +122,7 @@ process_clip() {
   # Phasen-Marker: der Monitor liest die ZULETZT geloggte PHASE-Zeile (monoton,
   # unabhängig davon, wann die Zwischendateien angelegt werden).
   log "[GPU $gpu] PHASE Denoise: $name"
+  local t_dn=$SECONDS
   if ! ffmpeg -y -i "$input" \
         -vf "hqdn3d=1:8:2:8" \
         -c:v libx264 -crf 14 -preset slow \
@@ -120,6 +131,8 @@ process_clip() {
     log "[GPU $gpu] FAIL: $name"
     return 1
   fi
+  # TIMING: Denoise laeuft auf der CPU -> in dieser Zeit IDLET die GPU (Kosten!).
+  log "[GPU $gpu] TIMING Denoise ${name}: $(( SECONDS - t_dn ))s"
 
   # --- 2. SeedVR2-Upscale ------------------------------------------------
   # GPU-ISOLATION per CUDA_VISIBLE_DEVICES statt --cuda_device:
@@ -136,7 +149,12 @@ process_clip() {
   local cache_dir="$TMP_DIR/inductor_gpu${gpu}"
   mkdir -p "$cache_dir" "$cache_dir/triton"
 
-  log "[GPU $gpu] PHASE Upscale: $name"
+  # Optionale A/B-Flags nur anhaengen, wenn per Env gesetzt (sonst SeedVR2-Default).
+  local extra_args=()
+  [ -n "$COMPILE_MODE" ] && extra_args+=(--compile_mode "$COMPILE_MODE")
+
+  log "[GPU $gpu] PHASE Upscale: $name  (attn=$ATTENTION_MODE compile_mode=${COMPILE_MODE:-default})"
+  local t_up=$SECONDS
   if ! CUDA_VISIBLE_DEVICES="$gpu" \
        TORCHINDUCTOR_CACHE_DIR="$cache_dir" \
        TRITON_CACHE_DIR="$cache_dir/triton" \
@@ -150,12 +168,16 @@ process_clip() {
         --compile_dit --compile_vae \
         --attention_mode "$ATTENTION_MODE" \
         --video_backend "$VIDEO_BACKEND" \
+        "${extra_args[@]}" \
         --cuda_device 0 </dev/null; then
     warn "[GPU $gpu] SeedVR2-Upscale fehlgeschlagen: $name — überspringe Clip."
     log "[GPU $gpu] FAIL: $name"   # Marker für den Monitor (busy=0, sichtbar als Fehler)
     rm -f "$dechroma"
     return 1
   fi
+  # TIMING: reine GPU-Arbeit (Encode+Upscale+Decode). Vergleichsgroesse fuers
+  # A/B von ATTENTION_MODE / COMPILE_MODE — kleiner = guenstiger pro Frame.
+  log "[GPU $gpu] TIMING Upscale ${name}: $(( SECONDS - t_up ))s"
 
   # --- 3. Audio-Remux (robust) -------------------------------------------
   # Prüfe, ob der ORIGINAL-Clip eine Audiospur hat. Fehlender Ton darf den
@@ -246,7 +268,9 @@ worker() {
         process_clip "$path" "$gpu" >>"$logfile" 2>&1
         worked=1
       fi
-    done < <(ls -1 "$INPUT_DIR" 2>/dev/null | sort)
+    # Größte Datei zuerst (≈ meiste Frames): der Orchestrator lädt die teuersten
+    # Clips zuerst hoch — dieselbe Priorität auch beim Claimen auf der Node.
+    done < <(ls -1S "$INPUT_DIR" 2>/dev/null)
 
     # Nichts abgegriffen? kurz warten, dann erneut scannen (Streaming-Intake).
     [ "$worked" -eq 0 ] && sleep "$IDLE_SLEEP"

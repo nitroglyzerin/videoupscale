@@ -8,11 +8,37 @@ Verzeichnis ab — dann ist die Größe sofort stabil.
 from __future__ import annotations
 
 import os
-from typing import Dict
+import subprocess
+from typing import Dict, Optional
 
 from .db import DB
 
 VIDEO_EXT = {".mp4", ".mkv", ".avi", ".mov", ".m2ts", ".ts", ".mpg", ".mpeg", ".webm"}
+
+
+def probe_frames(path: str) -> Optional[int]:
+    """Frame-Anzahl eines Videos via ffprobe — NUR aus dem Container-Index
+    (nb_frames, bei MP4 instant), Fallback Dauer x fps. Bewusst KEIN
+    -count_packets: das liest die ganze Datei (bei WD-Red-Volumen ewig).
+
+    ACHTUNG ffprobe-Falle: die CSV-Ausgabe hält sich NICHT an die angefragte
+    Feld-Reihenfolge -> key=value (-of default=nw=1) parsen. None = Messung
+    fehlgeschlagen (kein ffprobe / kaputte Datei).
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=nb_frames,avg_frame_rate,duration",
+             "-of", "default=nw=1", path],
+            capture_output=True, text=True, timeout=60)
+        kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+        if kv.get("nb_frames", "").isdigit():
+            return int(kv["nb_frames"])
+        num, den = (kv.get("avg_frame_rate", "0/1").split("/") + ["1"])[:2]
+        n = int(float(kv.get("duration", "0")) * float(num) / float(den or 1))
+        return n if n > 0 else None
+    except Exception:  # noqa: BLE001 — Messung ist optional, nie crashen
+        return None
 
 
 class Ingest:

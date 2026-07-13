@@ -35,6 +35,7 @@ from textual.widgets import Footer, Header, Static
 
 from .config import Config
 from .db import DB
+from .report import cost_stats
 
 # ---------------------------------------------------------------------------
 #  Snapshot laden (robust — die UI darf an keinem I/O-Fehler crashen).
@@ -342,6 +343,106 @@ class VideosScreen(ModalScreen):
                 self.app.db.add_command("requeue", arg=c["name"])
                 n += 1
         self.app.notify(f"{n} fehlgeschlagene Clips zum Retry eingereiht.")
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
+def _de(n: int) -> str:
+    """1234567 -> '1.234.567' (deutsche Tausenderpunkte)."""
+    return f"{n:,}".replace(",", ".")
+
+
+class CostScreen(ModalScreen):
+    """Kosten-Seite: echte $/Frame-Rate aus fertigen Clips, Hochrechnung auf den
+    offenen Bestand und die teuersten offenen Videos (kommen zuerst dran)."""
+
+    BINDINGS = [Binding("escape,k,q", "close", "Zurück")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="costbox"):
+            yield Static(id="costbody")
+
+    def on_mount(self) -> None:
+        self._repaint()
+        self.set_interval(2.0, self._repaint)
+
+    def _repaint(self) -> None:
+        body = self.query_one("#costbody", Static)
+        try:
+            s = cost_stats(self.app.cfg, self.app.db)
+        except Exception as e:  # noqa: BLE001 — Anzeige darf nie crashen
+            body.update(Panel(Text(f"Kosten-Statistik fehlgeschlagen: {e}",
+                                   style="red"), border_style="red"))
+            return
+
+        parts: list = [Text("Rate — echte Node-Rechnung ÷ fertig verarbeitete Frames",
+                            style="bold")]
+        nt = Table.grid(padding=(0, 2))
+        for _ in range(6):
+            nt.add_column()
+        for n in s["nodes"]:
+            live = n["status"] != "destroyed"
+            nt.add_row(
+                Text(f"#{n['iid']}", style="bold" if live else "grey62"),
+                Text(f"{n['ngpu']}x {n['gpu'] or '?'}", style="grey70"),
+                Text(f"{n['dph']:.3f} $/h · {n['hours']:.2f} h"
+                     + (" (läuft)" if live else ""), style="grey62"),
+                Text(f"{n['cost']:.2f} $", style="yellow" if live else "grey70"),
+                Text(f"{n['clips']} Clips · {_de(n['frames'])} F", style="grey70"),
+                Text(f"{n['rate1k']:.4f} $/1k F" if n["rate1k"] else "—",
+                     style="cyan"),
+            )
+        if s["nodes"]:
+            parts.append(nt)
+        if s["rate"] is not None:
+            line = Text(
+                f"Rate: {s['prod_cost']:.2f} $ ÷ {_de(s['done_frames'])} Frames  →  "
+                f"{s['rate']*1000:.4f} $/1000 Frames", style="bold green")
+            line.append(f"   (gesamt ausgegeben: {s['total_cost']:.2f} $)",
+                        style="grey62")
+            parts.append(line)
+        else:
+            parts.append(Text("Noch keine fertigen Clips mit Frame-Messung — "
+                              "Rate/Hochrechnung erscheinen nach den ersten "
+                              "fertigen Clips.", style="yellow"))
+
+        parts += [Text(""), Text("Bestand & Hochrechnung", style="bold")]
+        parts.append(Text(
+            f"{_de(s['total_clips'])} Videos · {_de(s['total_frames'])} Frames erfasst · "
+            f"offen: {_de(s['open_clips'])} Videos / {_de(s['open_frames'])} Frames",
+            style="grey70"))
+        if s["unknown"]:
+            parts.append(Text(f"⚠ {s['unknown']} Clips ohne Frame-Messung "
+                              "(zählen als 0 — Hochrechnung ist Untergrenze)",
+                              style="yellow"))
+        if s["est_open_cost"] is not None:
+            eta = ""
+            if s["eta_h"]:
+                eta = (f"   ·   Durchsatz {_de(int(s['thruput_gpu_h']))} F/GPU-h × "
+                       f"{s['active_gpus']} GPUs → ETA ~{s['eta_h']:.1f} h")
+            parts.append(Text(f"→ geschätzte Restkosten: {s['est_open_cost']:.2f} $"
+                              + eta, style="bold green"))
+
+        parts += [Text(""),
+                  Text("Teuerste offene Videos — kommen dank Priorisierung zuerst dran",
+                       style="bold")]
+        tt = Table.grid(padding=(0, 2))
+        for _ in range(4):
+            tt.add_column()
+        for c in s["top_open"]:
+            tt.add_row(
+                Text(f"{_de(c['frames'])} F", style="grey70"),
+                Text(f"{c['cost']:.2f} $" if c["cost"] is not None else "—",
+                     style="cyan"),
+                Text(c["status"], style="grey62"),
+                Text(c["name"]),
+            )
+        parts.append(tt)
+
+        body.update(Panel(Group(*parts),
+                          title="Kosten & Hochrechnung — Esc=zurück",
+                          border_style="cyan"))
 
     def action_close(self) -> None:
         self.app.pop_screen()
@@ -808,6 +909,7 @@ class HomeScreen(Screen):
         Binding("p", "pull_all", "Pull alle"),
         Binding("x", "destroy", "Zerstören"),
         Binding("v", "videos", "Videos"),
+        Binding("k", "costs", "Kosten"),
         Binding("f", "finalize", "Finalisieren", show=False),
         Binding("l", "log", "Log"),
         # 'app.quit' (nicht 'quit'): eine Screen-Bindung löst die Aktion im
@@ -905,7 +1007,8 @@ class HomeScreen(Screen):
                   Text("Nodes — Zifferntaste öffnet Detail:", style="bold"),
                   ntab, Text(""),
                   Text("[a] Node dazu   [p] Pull alle   [x] Zerstören   [v] Videos   "
-                       "[f] Finalisieren   [l] Log   [q] Beenden", style="grey62")]
+                       "[k] Kosten   [f] Finalisieren   [l] Log   [q] Beenden",
+                       style="grey62")]
         border = "red" if stale else ("yellow" if stalls else "cyan")
         body.update(Panel(Group(*parts), title="VHS-Upscale-Orchestrator — Der Lauf",
                           border_style=border))
@@ -948,6 +1051,9 @@ class HomeScreen(Screen):
     def action_videos(self) -> None:
         self.app.push_screen(VideosScreen())
 
+    def action_costs(self) -> None:
+        self.app.push_screen(CostScreen())
+
     def action_log(self) -> None:
         self.app.push_screen(LogScreen())
 
@@ -962,7 +1068,7 @@ class VhsApp(App):
     CSS = """
     Screen { align: center top; }
     #homebody, #nodebody { width: 100%; }
-    #addbox, #logbox, #vidbox, #destroybox { align: center middle; width: 90%; }
+    #addbox, #logbox, #vidbox, #costbox, #destroybox { align: center middle; width: 90%; }
     """
     TITLE = "vhsorch"
 

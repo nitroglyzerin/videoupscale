@@ -1,8 +1,10 @@
 FROM python:3.12-slim
 
 # rsync + openssh-client für den ausgehenden Transfer zu den Vast-Nodes.
+# ffmpeg liefert ffprobe: Frame-Messung der Rohclips (Warteschlangen-Priorität
+# "teuerste zuerst" + Kosten-/Hochrechnungs-Seite der TUI).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends rsync openssh-client tmux \
+    && apt-get install -y --no-install-recommends rsync openssh-client tmux ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

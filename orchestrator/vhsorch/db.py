@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS clips (
     status      TEXT NOT NULL,      -- pending|assigned|uploaded|done|failed
     node_id     INTEGER,            -- Vast-Instanz-ID der zugewiesenen Node
     size        INTEGER,
+    frames      INTEGER,            -- Frame-Anzahl (ffprobe); NULL=unvermessen, 0=unbekannt
     assigned_at REAL,
     done_at     REAL
 );
@@ -37,7 +38,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     worker_started INTEGER DEFAULT 0,
     bootstrap_started INTEGER DEFAULT 0,  -- 1, sobald wir den Bootstrap per SSH angestoßen haben
     models_pushed INTEGER DEFAULT 0,      -- 1, sobald die SeedVR2-Modelle auf die Node gepusht sind
-    created_at  REAL
+    created_at  REAL,
+    destroyed_at REAL                     -- Kostenfenster-Ende (echte $-Rechnung der Kosten-Seite)
 );
 CREATE TABLE IF NOT EXISTS commands (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +59,13 @@ CREATE TABLE IF NOT EXISTS commands (
 _MIGRATIONS = [
     "ALTER TABLE nodes ADD COLUMN bootstrap_started INTEGER DEFAULT 0",
     "ALTER TABLE nodes ADD COLUMN models_pushed INTEGER DEFAULT 0",
+    "ALTER TABLE nodes ADD COLUMN destroyed_at REAL",
+    "ALTER TABLE clips ADD COLUMN frames INTEGER",
 ]
+
+# Warteschlangen-Priorität: teuerste (= meiste Frames) Clips zuerst. Unvermessene
+# (NULL) und unbekannte (0) Clips hinten anstellen, Name als stabiler Tiebreaker.
+_PRIO = "COALESCE(frames, -1) DESC, name"
 
 # Node-Status, die als "aktiv" gelten (Kosten laufen, Node sichtbar, Ergebnisse
 # noch einsammelbar). 'draining' ist bewusst dabei: eine drainende Node bekommt
@@ -128,7 +136,7 @@ class DB:
                 self._conn.execute("SELECT name FROM clips").fetchall()]
 
     def pending_clips(self, limit: Optional[int] = None) -> list[sqlite3.Row]:
-        q = "SELECT * FROM clips WHERE status='pending' ORDER BY name"
+        q = f"SELECT * FROM clips WHERE status='pending' ORDER BY {_PRIO}"
         if limit:
             q += f" LIMIT {int(limit)}"
         return self._conn.execute(q).fetchall()
@@ -136,11 +144,11 @@ class DB:
     def clips_for_node(self, instance_id: int, status: Optional[str] = None) -> list[sqlite3.Row]:
         if status:
             return self._conn.execute(
-                "SELECT * FROM clips WHERE node_id=? AND status=? ORDER BY name",
+                f"SELECT * FROM clips WHERE node_id=? AND status=? ORDER BY {_PRIO}",
                 (instance_id, status),
             ).fetchall()
         return self._conn.execute(
-            "SELECT * FROM clips WHERE node_id=? ORDER BY name", (instance_id,)
+            f"SELECT * FROM clips WHERE node_id=? ORDER BY {_PRIO}", (instance_id,)
         ).fetchall()
 
     def assign_clip(self, name: str, instance_id: int) -> None:
@@ -156,7 +164,7 @@ class DB:
             return 0
         with self.tx() as conn:
             rows = conn.execute(
-                "SELECT name FROM clips WHERE status='pending' ORDER BY name LIMIT ?",
+                f"SELECT name FROM clips WHERE status='pending' ORDER BY {_PRIO} LIMIT ?",
                 (int(limit),),
             ).fetchall()
             now = time.time()
@@ -173,13 +181,30 @@ class DB:
         zurück in den pending-Pool — für die Balance, wenn eine Node zu viel hält."""
         if limit <= 0:
             return 0
+        # Kleinste zuerst zurückgeben: die Node behält ihre teuersten Clips,
+        # der Pool verteilt die kleinen an unterfüllte Nodes.
         cur = self._conn.execute(
             "UPDATE clips SET status='pending', node_id=NULL, assigned_at=NULL "
             "WHERE name IN (SELECT name FROM clips WHERE node_id=? AND status='assigned' "
-            "               ORDER BY name LIMIT ?)",
+            "               ORDER BY COALESCE(frames, -1) ASC, name LIMIT ?)",
             (instance_id, int(limit)),
         )
         return cur.rowcount
+
+    def reassign_uploaded_to(self, name: str, src_iid: int, dst_iid: int) -> bool:
+        """Zieht einen uploaded-Clip von der Quell- auf die Ziel-Node um (Work-
+        Stealing). Geführt: NUR wenn der Clip noch als 'uploaded' der Quelle
+        gehört (sonst hat er sich zwischenzeitlich geändert -> No-op). Neuer
+        Status 'assigned' -> die Ziel-Node lädt ihn per Service-Flow hoch.
+        Der Aufrufer MUSS die Datei auf der Quelle vorher entfernt/geclaimt haben
+        (steal_clip), sonst verarbeiten beide Nodes denselben Clip. True, wenn
+        umgezogen."""
+        cur = self._conn.execute(
+            "UPDATE clips SET status='assigned', node_id=?, assigned_at=? "
+            "WHERE name=? AND node_id=? AND status='uploaded'",
+            (dst_iid, time.time(), name, src_iid),
+        )
+        return cur.rowcount > 0
 
     def set_clip_status(self, name: str, status: str) -> None:
         done_at = time.time() if status == "done" else None
@@ -283,6 +308,42 @@ class DB:
         ).fetchone()
         return row["c"] == 0
 
+    # --- Frames & Kosten ------------------------------------------------------
+    def set_clip_frames(self, name: str, frames: int) -> None:
+        self._conn.execute("UPDATE clips SET frames=? WHERE name=?", (int(frames), name))
+
+    def clips_missing_frames(self, limit: int = 200) -> list[str]:
+        """Clips ohne Frame-Messung (NULL). 0 = Messung fehlgeschlagen -> nie erneut."""
+        return [r["name"] for r in self._conn.execute(
+            "SELECT name FROM clips WHERE frames IS NULL LIMIT ?", (int(limit),)
+        ).fetchall()]
+
+    def frames_overview(self) -> dict[str, dict[str, int]]:
+        """Pro Status: Anzahl Clips, Frame-Summe, Anzahl unvermessener Clips."""
+        out: dict[str, dict[str, int]] = {}
+        for r in self._conn.execute(
+            "SELECT status, COUNT(*) n, SUM(COALESCE(frames,0)) f, "
+            "       SUM(CASE WHEN frames IS NULL OR frames=0 THEN 1 ELSE 0 END) unk "
+            "FROM clips GROUP BY status"
+        ).fetchall():
+            out[r["status"]] = {"n": r["n"], "frames": r["f"] or 0, "unknown": r["unk"] or 0}
+        return out
+
+    def done_frames_by_node(self) -> dict[int, sqlite3.Row]:
+        """Fertige Clips je Node: Anzahl, Frame-Summe, letztes done_at (Kostenfenster)."""
+        return {r["node_id"]: r for r in self._conn.execute(
+            "SELECT node_id, COUNT(*) n, SUM(COALESCE(frames,0)) f, MAX(done_at) last_done "
+            "FROM clips WHERE status='done' AND node_id IS NOT NULL GROUP BY node_id"
+        ).fetchall()}
+
+    def top_open_clips(self, limit: int = 15) -> list[sqlite3.Row]:
+        """Teuerste noch offene Clips (werden dank Priorisierung zuerst verarbeitet)."""
+        return self._conn.execute(
+            f"SELECT name, status, frames FROM clips "
+            f"WHERE status IN ('pending','assigned','uploaded') "
+            f"ORDER BY {_PRIO} LIMIT ?", (int(limit),)
+        ).fetchall()
+
     # --- Nodes ---------------------------------------------------------------
     def add_node(self, **kw) -> None:
         self._conn.execute(
@@ -303,7 +364,15 @@ class DB:
     def update_node(self, instance_id: int, **kw) -> None:
         if not kw:
             return
-        cols = ", ".join(f"{k}=:{k}" for k in kw)
+        # Kostenfenster-Ende festhalten: COALESCE, damit ein wiederholtes
+        # 'destroyed' den ersten (echten) Zeitpunkt nicht überschreibt.
+        if kw.get("status") == "destroyed":
+            kw.setdefault("destroyed_at", time.time())
+        cols = ", ".join(
+            "destroyed_at=COALESCE(destroyed_at, :destroyed_at)" if k == "destroyed_at"
+            else f"{k}=:{k}"
+            for k in kw
+        )
         kw["instance_id"] = instance_id
         self._conn.execute(f"UPDATE nodes SET {cols} WHERE instance_id=:instance_id", kw)
 

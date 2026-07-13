@@ -155,6 +155,12 @@ def cmd_videos(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_costs(cfg: Config, args) -> int:
+    """Echte $/Frame-Rate aus fertigen Clips + Hochrechnung auf den Restbestand."""
+    print(report.render_costs(cfg, DB(cfg.db_path)))
+    return 0
+
+
 def cmd_pull(cfg: Config, args) -> int:
     """Nur einsammeln: fertige Ergebnisse von allen Nodes ziehen (RETTUNG).
 
@@ -238,6 +244,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("workmap", help="welche GPU/Node arbeitet an welchem Video (live)")
     sp.set_defaults(func=cmd_workmap)
+
+    sp = sub.add_parser("costs", help="$/Frame-Rate aus fertigen Clips + Hochrechnung")
+    sp.set_defaults(func=cmd_costs)
 
     sp = sub.add_parser("videos", help="Video-Liste mit Zustand + Kosten pro Video")
     sp.add_argument("--limit", type=int, default=40,

@@ -74,6 +74,7 @@ class Config:
     min_ram_per_gpu_gb: int     # Mindest-Host-RAM je GPU beim Buchen (gegen VAE-Decode-OOM)
     worker_wedge_grace: int     # Sek. „wedged" (Worker lebt, 0 GPU aktiv, Restarbeit) bis Auto-Neustart
     worker_wedge_max_restarts: int  # max. Auto-Neustarts je Node, dann nur noch Alarm (Mensch ran)
+    work_steal: bool            # leere Nodes klauen wartende uploaded-Clips von überladenen Nodes
     # Kostenmodell (Video-/Kostenübersicht)
     cost_rate_x: float
     gpu_cost_factors: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_GPU_FACTORS))
@@ -137,6 +138,7 @@ class Config:
             # festgefahren; 90 s deckt Startup+Stagger+Probe-Staleness ab.
             worker_wedge_grace=int(os.environ.get("WORKER_WEDGE_GRACE", "90")),
             worker_wedge_max_restarts=int(os.environ.get("WORKER_WEDGE_MAX_RESTARTS", "3")),
+            work_steal=_bool("WORK_STEAL", "1"),
             cost_rate_x=float(os.environ.get("COST_RATE_X", "0.01")),
             gpu_cost_factors=_parse_gpu_factors(os.environ.get("GPU_COST_FACTORS", "")),
             gpu_factor_default=float(os.environ.get("GPU_FACTOR_DEFAULT", "1.0")),

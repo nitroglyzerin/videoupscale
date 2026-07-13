@@ -33,13 +33,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .config import Config, SEEDVR2_MODEL_FILES
 from .db import DB
-from .ingest import Ingest
+from .ingest import Ingest, probe_frames
 from .models import ensure_models_cached, models_present
 from .remote import Remote
 from .vast import VastClient
@@ -138,6 +139,10 @@ class Scheduler:
         self._started_wall = time.time()
         self._last_work_wall = 0.0
         self._last_probe_wall = 0.0
+
+        # Frame-Backfill (ffprobe): single-flight-Flag + Einmal-Warnung.
+        self._frames_probing = False
+        self._ffprobe_warned = False
 
     # -- Per-Node-Single-Flight ----------------------------------------------
     def _acquire(self, iid: int, label: str) -> bool:
@@ -404,9 +409,11 @@ class Scheduler:
         new = self.ingest.scan()
         if new:
             log(f"{new} neue Rohclips in die Queue aufgenommen.")
+        self._maybe_probe_frames()
         self.sync_vast()
         self._poke_bootstraps()
         self.distribute()
+        self.rebalance_uploaded()
         self.dispatch_service()
         if self.maybe_destroy():
             log("Alle Nodes zerstört. Lauf abgeschlossen.")
@@ -415,6 +422,52 @@ class Scheduler:
         self._last_work_wall = time.time()
         c = self.db.counts()
         log(f"Queue {dict(c)} | {self.cost_line()}")
+
+    def _maybe_probe_frames(self) -> None:
+        """Vermisst unvermessene Clips (frames IS NULL) im Hintergrund per ffprobe.
+
+        Grundlage für die Warteschlangen-Priorität (teuerste zuerst) und die
+        Kosten-Seite der TUI. Single-flight im Heavy-Pool; nb_frames kommt aus
+        dem MP4-Index (instant), der Backlog ist also in Sekunden abgearbeitet.
+        """
+        if self._frames_probing or self._ffprobe_warned:
+            return
+        if not self.db.clips_missing_frames(limit=1):
+            return
+        if shutil.which("ffprobe") is None:
+            self._ffprobe_warned = True
+            log("WARNUNG: ffprobe fehlt im Container — keine Frame-Messung "
+                "(Priorisierung/Kosten-Seite unvollständig). Image neu bauen.")
+            return
+        self._frames_probing = True
+        self._pool.submit(self._probe_frames_bg)
+
+    def _probe_frames_bg(self) -> None:
+        try:
+            measured = failed = 0
+            while True:
+                batch = self.db.clips_missing_frames(limit=200)
+                if not batch:
+                    break
+                for name in batch:
+                    path = os.path.join(self.cfg.raw_dir, name)
+                    if not os.path.isfile(path):
+                        # Rohdatei weg (z. B. schon fertig + aufgeräumt) ->
+                        # Ergebnis in done/ hat dieselbe Frame-Anzahl.
+                        path = os.path.join(
+                            self.cfg.done_dir, os.path.splitext(name)[0] + ".mp4")
+                    n = probe_frames(path)
+                    # 0 = "unbekannt, nicht erneut versuchen" (NULL bliebe im Backlog).
+                    self.db.set_clip_frames(name, n if n and n > 0 else 0)
+                    measured += 1 if n else 0
+                    failed += 0 if n else 1
+            if measured or failed:
+                log(f"Frame-Messung: {measured} Clips vermessen"
+                    + (f", {failed} ohne Ergebnis" if failed else "") + ".")
+        except Exception as e:  # noqa: BLE001 — Messung darf den Lauf nie stören
+            log(f"Frame-Messung fehlgeschlagen: {e}")
+        finally:
+            self._frames_probing = False
 
     def sync_vast(self) -> None:
         """Gleicht DB-Nodes mit dem realen Vast-Zustand ab (SSH-Zugang, Tod)."""
@@ -516,6 +569,103 @@ class Scheduler:
                     "WHERE name=? AND status='pending'", (iid, now, clip["name"]))
                 per_node[iid] = per_node.get(iid, 0) + 1
         log("Verteilt: " + ", ".join(f"Node {i}+{n}" for i, n in per_node.items()))
+
+    def rebalance_uploaded(self) -> None:
+        """Work-Stealing: schaufelt noch NICHT gestartete uploaded-Clips von
+        überladenen Nodes zu ready-Nodes mit freien (idle) GPUs.
+
+        Nötig, weil distribute() nur den pending-Pool verteilt und einmal
+        hochgeladene Clips fest an ihrer Node kleben. Kommt SPÄT ein leerer Node
+        dazu, während eine frühe Node bereits alle Clips hochgeladen hat, bekäme
+        er sonst nie Arbeit (weniger Clips als der Puffer der ersten Node).
+
+        Modell = idle-GPU-Kapazität: ein Node mit freien GPUs, dessen eigene
+        wartenden Clips diese nicht füllen, ist DIEB (need); ein Node mit mehr
+        wartenden Clips als eigenen idle-GPUs ist OPFER (surplus). Ein Clip zählt
+        als „wartend", wenn er uploaded, aber NICHT gerade busy und NICHT fertig
+        ist. So wird nur echter Überschuss bewegt (eine Node behält genug, um ihre
+        eigenen idle-GPUs zu füttern).
+
+        NUR Entscheidung hier (kein SSH). Der Umzug (atomarer Claim + rm auf der
+        Quelle, dann DB) läuft im Heavy-Pool, single-flight auf der Quell-Node."""
+        if not self.cfg.work_steal:
+            return
+        nodes = [n for n in self.db.active_nodes()
+                 if n["status"] == "ready" and n["ssh_host"]]
+        if len(nodes) < 2:
+            return
+        thief_slots: list[int] = []           # dst-iid je freiem GPU-Slot
+        steal_pool: list[tuple[int, str]] = []  # (src-iid, clip-name) je Überschuss
+        for node in nodes:
+            iid = node["instance_id"]
+            gpus = node["num_gpus"] or 1
+            pc = self._probes.get(iid)
+            p = pc["data"] if pc else None
+            if not (p and p.get("reachable")):
+                continue  # ohne frische Probe kein sicheres Urteil
+            ga = p.get("gpus_activity", [])
+            busy_names = {t[2] for t in ga if t[1] == "busy" and t[2]}
+            finals = {os.path.splitext(f)[0] for f in p.get("final", [])}
+            waiting = sorted(
+                c["name"] for c in self.db.clips_for_node(iid, "uploaded")
+                if os.path.splitext(c["name"])[0] not in busy_names
+                and os.path.splitext(c["name"])[0] not in finals)
+            idle_gpus = max(0, gpus - len(busy_names))
+            need = max(0, idle_gpus - len(waiting))
+            if need > 0:
+                thief_slots += [iid] * need
+            elif len(waiting) > idle_gpus:
+                # Überschuss = alles über der eigenen idle-GPU-Kapazität.
+                steal_pool += [(iid, c) for c in waiting[idle_gpus:]]
+        if not thief_slots or not steal_pool:
+            return
+        # Zuordnung: fülle Dieb-Slots reihum aus dem Überschuss (nie an sich
+        # selbst), gruppiert nach Quell-Node. Pro Quelle EIN Heavy-Pool-Task, der
+        # ihren ganzen Überschuss in einem Rutsch abräumt (eine SSH-Verbindung,
+        # ControlPersist) — sonst zöge der Single-Flight-Guard das Rebalancing
+        # über viele Ticks (1 Clip/Quelle/Tick).
+        by_src: dict[int, list[tuple[str, int]]] = {}
+        ti = 0
+        for src_iid, clip in steal_pool:
+            while ti < len(thief_slots) and thief_slots[ti] == src_iid:
+                ti += 1
+            if ti >= len(thief_slots):
+                break
+            by_src.setdefault(src_iid, []).append((clip, thief_slots[ti]))
+            ti += 1
+        for src_iid, items in by_src.items():
+            if not self._acquire(src_iid, "steal"):
+                continue  # Quelle gerade in anderer Operation -> nächster Tick
+            try:
+                self._pool.submit(self._run_steal, src_iid, items)
+            except Exception as e:  # noqa: BLE001 — Flag nie leaken
+                self._release(src_iid)
+                log(f"Node {src_iid}: Steal-Dispatch fehlgeschlagen: {e}")
+
+    def _run_steal(self, src_iid: int, items: list[tuple[str, int]]) -> None:
+        """Zieht die wartenden uploaded-Clips einer Quell-Node zu ihren Zielen um
+        (Heavy-Pool, single-flight auf src). items = [(clip_name, dst_iid), …]."""
+        try:
+            src = self.db.get_node(src_iid)
+            r = self._remote(src) if src else None
+            if r is None:
+                return
+            uploaded = {c["name"] for c in self.db.clips_for_node(src_iid, "uploaded")}
+            for clip_name, dst_iid in items:
+                # Noch stehlbar? (Status kann sich seit der Entscheidung geändert
+                # haben, z. B. der Worker hat ihn inzwischen gegriffen.)
+                if clip_name not in uploaded:
+                    continue
+                # Atomar claimen + Datei entfernen. Scheitert das, läuft der Clip
+                # GERADE auf der Quelle -> NICHT anfassen (keine Doppelverarbeitung).
+                if not r.steal_clip(clip_name):
+                    continue
+                if self.db.reassign_uploaded_to(clip_name, src_iid, dst_iid):
+                    log(f"Work-Stealing: '{clip_name}' Node {src_iid} -> Node {dst_iid}.")
+        except Exception as e:  # noqa: BLE001
+            log(f"Steal-Fehler (Node {src_iid}): {e}")
+        finally:
+            self._release(src_iid)
 
     def dispatch_service(self) -> None:
         """Dispatcht pro Node EINEN Service-Task in den Heavy-Pool (single-flight):
