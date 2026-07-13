@@ -57,7 +57,7 @@ _PHASE_STEP = {"Denoise": "1/3", "Upscale": "2/3", "Audio": "3/3"}
 _UPSCALE_SUBPHASES = ("VAE-Encoding", "Upscaling", "VAE-Decoding")
 
 
-def _upscale_subpct(enc: str, samp: str, dec: str) -> int:
+def _upscale_subpct(enc: str, samp: str, dec: str, chunk: str = "") -> int:
     """Echter Upscale-Fortschritt aus den SeedVR2-BATCH-Zählern (nicht dem
     irreführenden Per-Batch-tqdm-%). SeedVR2 rechnet je Clip in Batches, in DREI
     Sub-Phasen nacheinander: VAE-Encoding ('Encoding batch N/M') -> Upscaling
@@ -66,6 +66,11 @@ def _upscale_subpct(enc: str, samp: str, dec: str) -> int:
     Inferenz (läuft eine spätere Sub-Phase, sind die früheren fertig). So klebt
     der Balken nicht bei ~100%, sondern zählt über alle drei Drittel monoton
     durch. -1 = keine Batch-Info (dann roher tqdm-%).
+
+    Mit CHUNK_SIZE (process.sh) läuft der Drei-Phasen-Zyklus PRO CHUNK
+    ('Chunk i/n'-Zeile der CLI, Batch-Zähler starten je Chunk neu). Dann gilt:
+    Gesamt = ((i-1) + Zyklus-Anteil) / n. Ohne Chunk-Info (kurze Clips, alte
+    Nodes) bleibt der Zyklus-Anteil selbst der Fortschritt.
     """
     def parse(x: str):
         try:
@@ -76,7 +81,8 @@ def _upscale_subpct(enc: str, samp: str, dec: str) -> int:
             return None
 
     e, s, d = parse(enc), parse(samp), parse(dec)
-    if not (e or s or d):
+    ch = parse(chunk)
+    if not (e or s or d or ch):
         return -1
     # gemeinsame Batchzahl M (Sub-Phasen batchen denselben Clip gleich) — nimm
     # die größte bekannte, sonst 1.
@@ -92,7 +98,11 @@ def _upscale_subpct(enc: str, samp: str, dec: str) -> int:
     else:
         done = 0
     total = 3 * m
-    return int(round(100 * done / total)) if total > 0 else -1
+    cycle = (done / total) if total > 0 else 0.0
+    if ch:
+        i, n = ch
+        return int(round(100 * ((i - 1) + cycle) / n)) if n > 0 else -1
+    return int(round(100 * cycle))
 
 
 def log(msg: str) -> None:
@@ -977,7 +987,8 @@ class Scheduler:
     #  Snapshot (der einzige Live-Datenkanal der TUI)
     # ========================================================================
     def _gpu_progress(self, iid: int, gpu: int, state: str, clip: str, phase: str,
-                      pct: str, enc: str = "", samp: str = "", dec: str = "") -> tuple[int, int]:
+                      pct: str, enc: str = "", samp: str = "", dec: str = "",
+                      chunk: str = "") -> tuple[int, int]:
         """Monotoner Fein-% (innerhalb der Phase) + Gesamt-% (über alle Phasen).
 
         Bei der Upscale-Phase kommt der Fein-% aus den SeedVR2-BATCH-Zählern der
@@ -992,7 +1003,7 @@ class Scheduler:
             return -1, -1
         pval = -1
         if phase == "Upscale":
-            pval = _upscale_subpct(enc, samp, dec)
+            pval = _upscale_subpct(enc, samp, dec, chunk)
         if pval < 0:
             try:
                 pval = int(pct.rstrip("%")) if pct else -1
@@ -1043,9 +1054,10 @@ class Scheduler:
             ngpu = n["num_gpus"] or (max(act_by_gpu, default=-1) + 1)
             gpus = []
             for g in range(ngpu):
-                st, clip, ph, pct, enc, samp, dec = act_by_gpu.get(
-                    g, ("waiting", "", "", "", "", "", ""))
-                fine, overall = self._gpu_progress(iid, g, st, clip, ph, pct, enc, samp, dec)
+                st, clip, ph, pct, enc, samp, dec, chk = act_by_gpu.get(
+                    g, ("waiting", "", "", "", "", "", "", ""))
+                fine, overall = self._gpu_progress(iid, g, st, clip, ph, pct,
+                                                   enc, samp, dec, chk)
                 util, used, total = stats.get(g, (None, None, None))
                 # Klartext-Batch-Stufe (SeedVR2 zählt in Batches, nicht Frames):
                 # Encoding -> Upscaling -> Decoding, spätere Stufe gewinnt.
@@ -1057,6 +1069,9 @@ class Scheduler:
                     batch = f"Encode {enc}"
                 else:
                     batch = ""
+                # Chunk-Kontext davor (CHUNK_SIZE aktiv): "Chunk 3/9 · Encode 42/100"
+                if chk:
+                    batch = f"Chunk {chk} · {batch}" if batch else f"Chunk {chk}"
                 gpus.append({
                     "index": g, "state": st, "clip": clip, "phase": ph,
                     "step": _PHASE_STEP.get(ph, ""),
